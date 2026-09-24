@@ -1,0 +1,10 @@
+{
+  "service": "ai-goofish-monitor",
+  "compose_files": ["infra/nas/compose.yaml"],
+  "images": {
+    "AIGOOFISH_IMAGE": {
+      "local": "ai-goofish-monitor:tested",
+      "repository": "ghcr.io/colorlesscube/ai-goofish-monitor"
+    }
+  }
+}

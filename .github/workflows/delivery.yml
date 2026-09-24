@@ -1,0 +1,76 @@
+name: Deliver main to NAS
+
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ai-goofish-continuous-delivery
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    uses: ./.github/workflows/ci.yml
+    with:
+      export_image: true
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: ColorlessCube/nas-deploy-toolkit
+          ref: e418193f998d9772cb2dc0db704e81d44bfb0ee9
+          path: .nas-deploy-toolkit
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: tested-image-${{ github.sha }}
+          path: /tmp/ai-goofish-tested
+      - name: Publish the exact tested image under an immutable build tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER_TYPE: ${{ github.event.repository.owner.type }}
+        run: |
+          docker load --input /tmp/ai-goofish-tested/image.tar.gz
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          python3 .nas-deploy-toolkit/infra/deploy/publish.py --config infra/nas/release.json --output /tmp/ai-goofish-manifest
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ai-goofish-deploy-${{ github.sha }}
+          path: /tmp/ai-goofish-manifest/
+          retention-days: 30
+          if-no-files-found: error
+      - name: Clear registry login
+        if: always()
+        run: docker logout ghcr.io
+
+  deploy:
+    if: vars.NAS_DEPLOY_ENABLED == 'true'
+    needs: publish
+    permissions:
+      contents: read
+      packages: read
+      actions: read
+    uses: ColorlessCube/nas-deploy-toolkit/.github/workflows/deploy-nas.yml@e418193f998d9772cb2dc0db704e81d44bfb0ee9
+    with:
+      service: ai-goofish-monitor
+      manifest_artifact: ai-goofish-deploy-${{ github.sha }}
+      toolkit_ref: e418193f998d9772cb2dc0db704e81d44bfb0ee9
+      ssh_user: deploy-ai-goofish
+      plan_only: false
+    secrets:
+      NAS_WG_PRIVATE_KEY: ${{ secrets.NAS_WG_PRIVATE_KEY }}
+      NAS_WG_PUBLIC_KEY: ${{ secrets.NAS_WG_PUBLIC_KEY }}
+      NAS_SSH_KEY: ${{ secrets.AI_GOOFISH_DEPLOY_SSH_KEY }}
+      NAS_KNOWN_HOSTS: ${{ secrets.NAS_KNOWN_HOSTS }}
