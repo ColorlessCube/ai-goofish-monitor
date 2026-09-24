@@ -8,7 +8,7 @@
 
 ## 共享工具链
 
-发布和 NAS 连接使用固定的 `ColorlessCube/nas-deploy-toolkit` commit `8654dac06876835ed8348c2cb5afcdc8ce7bee8c`。workflow checkout、可复用 workflow 引用和 `toolkit_ref` 输入必须保持为相同的完整 SHA；不要改成分支名或浮动标签。
+发布和 NAS 连接使用固定的 `ColorlessCube/nas-deploy-toolkit` commit `e23391085039c9101139afcff7c02d9da6ac4c76`。workflow checkout、可复用 workflow 引用和 `toolkit_ref` 输入必须保持为相同的完整 SHA；不要改成分支名或浮动标签。
 
 ## NAS onboarding（尚未执行）
 
