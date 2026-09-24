@@ -1,5 +1,6 @@
 {
   "service": "ai-goofish-monitor",
+  "branch": "master",
   "compose_files": ["infra/nas/compose.yaml"],
   "images": {
     "AIGOOFISH_IMAGE": {
