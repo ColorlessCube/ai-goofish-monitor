@@ -30,7 +30,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: ColorlessCube/nas-deploy-toolkit
-          ref: e418193f998d9772cb2dc0db704e81d44bfb0ee9
+          ref: 24a030416c206569a7e6552acd7238a3b3614fd1
           path: .nas-deploy-toolkit
           persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -62,11 +62,11 @@ jobs:
       contents: read
       packages: read
       actions: read
-    uses: ColorlessCube/nas-deploy-toolkit/.github/workflows/deploy-nas.yml@e418193f998d9772cb2dc0db704e81d44bfb0ee9
+    uses: ColorlessCube/nas-deploy-toolkit/.github/workflows/deploy-nas.yml@24a030416c206569a7e6552acd7238a3b3614fd1
     with:
       service: ai-goofish-monitor
       manifest_artifact: ai-goofish-deploy-${{ github.sha }}
-      toolkit_ref: e418193f998d9772cb2dc0db704e81d44bfb0ee9
+      toolkit_ref: 24a030416c206569a7e6552acd7238a3b3614fd1
       ssh_user: deploy-ai-goofish
       plan_only: false
     secrets:
