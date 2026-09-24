@@ -72,7 +72,7 @@ jobs:
           test "$(docker image inspect "$IMAGE" --format '{{ index .Config.Labels "org.opencontainers.image.source" }}')" = "https://github.com/$GITHUB_REPOSITORY"
       - name: Validate NAS Compose template
         run: |
-          cp .env.example .env
+          cp .env.example infra/nas/.env
           printf 'AIGOOFISH_IMAGE=ghcr.io/colorlesscube/ai-goofish-monitor@sha256:%064d\n' 0 > /tmp/.env.images
           docker compose -f infra/nas/compose.yaml --env-file /tmp/.env.images config --quiet
       - name: Export the exact tested image
