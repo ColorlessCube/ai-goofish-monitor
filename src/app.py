@@ -31,6 +31,7 @@ from src.services.task_generation_service import TaskGenerationService
 from src.infrastructure.persistence.sqlite_bootstrap import bootstrap_sqlite_storage
 from src.infrastructure.persistence.sqlite_task_repository import SqliteTaskRepository
 from src.infrastructure.config.settings import settings as app_settings
+from src.api.auth import ApiAuthorizationMiddleware, SESSION_COOKIE, issue_admin_session
 
 
 # 全局服务实例
@@ -101,6 +102,7 @@ app = FastAPI(
     version="2.0.0",
     lifespan=lifespan
 )
+app.add_middleware(ApiAuthorizationMiddleware)
 
 # 注册路由
 app.include_router(tasks.router)
@@ -133,7 +135,7 @@ async def health_check():
 
 # 认证状态检查端点
 from fastapi import Request, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 class LoginRequest(BaseModel):
@@ -143,14 +145,23 @@ class LoginRequest(BaseModel):
 
 @app.post("/auth/status")
 async def auth_status(payload: LoginRequest):
-    """检查认证状态"""
+    """Validate the password and establish an HttpOnly browser session."""
     if payload.username == app_settings.web_username and payload.password == app_settings.web_password:
-        return {"authenticated": True, "username": payload.username}
+        response = JSONResponse({"authenticated": True, "username": payload.username})
+        response.set_cookie(
+            key=SESSION_COOKIE,
+            value=issue_admin_session(payload.username),
+            httponly=True,
+            secure=True,
+            samesite="strict",
+            max_age=8 * 60 * 60,
+            path="/",
+        )
+        return response
     raise HTTPException(status_code=401, detail="认证失败")
 
 
 # 主页路由 - 服务 Vue 3 SPA
-from fastapi.responses import JSONResponse
 
 @app.get("/")
 async def read_root(request: Request):

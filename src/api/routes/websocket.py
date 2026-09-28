@@ -3,6 +3,7 @@ WebSocket 路由
 提供实时通信功能
 """
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from src.api.auth import SESSION_COOKIE, verify_admin_session
 from typing import Set
 
 
@@ -16,8 +17,15 @@ active_connections: Set[WebSocket] = set()
 async def websocket_endpoint(
     websocket: WebSocket,
 ):
-    """WebSocket 端点"""
-    # 接受连接
+    """Authenticated real-time updates for an administrator browser session."""
+    try:
+        subject = verify_admin_session(websocket.cookies.get(SESSION_COOKIE))
+    except RuntimeError:
+        subject = None
+    if not subject:
+        await websocket.close(code=4401)
+        return
+
     await websocket.accept()
     active_connections.add(websocket)
 
