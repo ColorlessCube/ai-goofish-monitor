@@ -40,7 +40,7 @@ NAS 自动部署通道仍未启用，没有新增 WireGuard peer、部署 SSH �
 
 专用 Key 只包含 `secrets:metadata:read`、`secrets:value:read`，仅 REST、仅一个精确会话 UUID 的 object grant，无 name/write/producer 授权，不复用 MoviePilot 或采集 Key。通过既有业务 handler、tenant RLS、OperationContext、审计及幂等回执一次创建。
 
-- 90 天期限，截止 `2027-01-17T10:03:20Z`，之后需要管理员续期或轮换，不会自动扩大授权。
+- 首次签发为90天期限；随后用户明确确认改为**永不过期**，已通过既有 `update_tenant_key` 业务操作将 `expires_at` 设为 `null`，revision 1→2。原token和文件不变，scope/REST/单条目授权不变，现有Key实测 access-status 200、expiry null、active grant 1。操作保留审计和独立幂等回执 `secrets/ass-key-permanent-20261019-receipt.json`；原签发回执保留历史，不覆盖。此次无需部署、重启或触发任务。
 - `secrets/` root 0700；`ass-read-key` root 0400、普通文件，容器 `/run/secrets/ass-read-key` **只读**。精确引用及一次性 guard、签发回执亦为 0400；不要删除 guard 重发 Key。
 - 实际授权读取：exact one active grant、schema 1 complete、version 2、130,282 bytes、一个来源/页面、16 个 Cookie（当时 13 个未过期）。无需开启 mixed 或 SameSite 归一。
 - 部署后真实客户端首次读出现固定 `ass_unavailable`，后续正常读取成功；没有弱化 TLS、期限、身份、版本或授权检查，没有回退本地。来源故障不增加网站风控失败计数。
@@ -75,6 +75,6 @@ NAS 自动部署通道仍未启用，没有新增 WireGuard peer、部署 SSH �
 
 - 日常手工 Compose 操作需要同时保留原基线和默认 override。固定 digest 已在本机缓存，不能为了日常重启换回上游 `latest`。
 - 正常任务配置只切换任务 8；其他任务仍维持原来源，未批量切换。
-- Key 到期前按管理员流程维护；Read Key 撤销只保证后续读取拒绝，不能撤回已授权浏览器请求。
+- 本Key已无固定到期日，不需要定期续期；仍可由管理员随时撤销，泄漏时应撤销/轮换。永不过期的是读取凭据，不是闲鱼登录态；登录态失效仍需重新登录并同步。Read Key 撤销只保证后续读取拒绝，不能撤回已授权浏览器请求。
 - 回退前先停止 ASS 任务并核对策略兼容；旧程序可能将未知 `ass` 归为 `auto`，不可盲目降级或用数据库全量恢复覆盖新结果。
 - 本地校验 195 非 live 测试、隔离原生 Chrome、前端构建仍是本地证据；线上业务以本记录实际运行结果为准。
