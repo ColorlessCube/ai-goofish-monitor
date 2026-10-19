@@ -44,7 +44,10 @@ from src.utils import (
 )
 from src.rotation import RotationPool, load_state_files, parse_proxy_pool, RotationItem
 from src.failure_guard import FailureGuard
-from src.services.account_strategy_service import resolve_account_runtime_plan
+from src.services.account_strategy_service import resolve_account_runtime_plan, uses_ass_account
+from src.infrastructure.credentials.ass_session_client import (
+    AssCredentialsError, AssSessionClient, AssSessionSettings, BrowserSession, PRIMARY_ORIGIN,
+)
 from src.infrastructure.persistence.storage_names import build_result_filename
 from src.services.item_analysis_dispatcher import (
     ItemAnalysisDispatcher,
@@ -155,7 +158,8 @@ async def _notify_task_failure(
         f"\n任务: {task_name}"
         f"\n关键词: {keyword or 'N/A'}"
         f"\n已自动暂停重试，暂停到: {paused_until_str}"
-        f"\n修复后(更新登录态/cookies文件)将自动恢复。"
+        + ("\n请检查ASS来源或等待网站冷却；远端快照刷新不会自动解除暂停。" if uses_ass_account(task_config)
+           else "\n修复后(更新登录态/cookies文件)将自动恢复。")
     )
 
     try:
@@ -338,13 +342,94 @@ def _build_extra_headers(raw_headers: Optional[dict]) -> dict:
     return headers
 
 
-async def scrape_user_profile(context, user_id: str) -> dict:
+async def _new_ass_context(browser, session: BrowserSession):
+    """在内存创建会话并恢复存储；Playwright异常不允许带出负载。"""
+    context = None
+    try:
+        snapshot = session.context_environment()
+        options = _build_context_overrides(snapshot)
+        for key in ("user_agent", "locale", "timezone_id"):
+            if key in options and not isinstance(options[key], str):
+                raise ValueError
+        if "viewport" in options and any(not 1 <= v <= 16384 for v in options["viewport"].values()):
+            raise ValueError
+        if "device_scale_factor" in options and not 0.1 <= options["device_scale_factor"] <= 10:
+            raise ValueError
+        headers = _build_extra_headers(snapshot["headers"])
+        if headers:
+            options["extra_http_headers"] = headers
+        context = await browser.new_context(storage_state=session.browser_state(), **options)
+        return context
+    except asyncio.CancelledError:
+        if context is not None:
+            await context.close()
+        raise
+    except Exception:
+        if context is not None:
+            try:
+                await context.close()
+            except Exception:
+                pass
+        raise AssCredentialsError("ass_browser_setup_failed") from None
+
+
+async def _new_task_page(context, session: Optional[BrowserSession] = None):
+    """新标签页仅初始化一次sessionStorage，不在后续导航时复活旧值。"""
+    if session is None:
+        return await context.new_page()
+    page = None
+    seed_url = PRIMARY_ORIGIN + "/__ass_session_seed__"
+    try:
+        page = await context.new_page()
+        # 此导航由本地route完全应答，不向网站发送探针；真实页面脚本尚未运行。
+        async def seed(route):
+            await route.fulfill(status=200, content_type="text/html", body="<!doctype html>",
+                                headers={"referrer-policy": "no-referrer", "cache-control": "no-store"})
+        await page.route(seed_url, seed)
+        await page.goto(seed_url, wait_until="domcontentloaded")
+        await page.evaluate("""raw => {
+            const values = JSON.parse(raw);
+            for (const [key, value] of Object.entries(values)) sessionStorage.setItem(key, value);
+        }""", json.dumps(session.session_storage(), ensure_ascii=True))
+        await page.unroute(seed_url, seed)
+        return page
+    except asyncio.CancelledError:
+        if page is not None:
+            await page.close()
+        raise
+    except Exception:
+        if page is not None:
+            try:
+                await page.close()
+            except Exception:
+                pass
+        raise AssCredentialsError("ass_browser_setup_failed") from None
+
+
+def _public_error(error: Exception, sensitive: bool) -> str:
+    return "browser_operation_failed" if sensitive else str(error)
+
+
+def _check_ass_site_response(data: dict) -> None:
+    """显式网站拒绝不能当空结果成功，也不回显ret里的令牌或挑战URL。"""
+    if not isinstance(data, dict):
+        raise RuntimeError("site_response_invalid")
+    codes = data.get("ret") or []
+    if isinstance(codes, str):
+        codes = [codes]
+    if any("FAIL_SYS_USER_VALIDATE" in str(code) for code in codes):
+        raise RiskControlError("site_risk_control")
+    if any(marker in str(code) for code in codes for marker in ("FAIL_SYS_SESSION_EXPIRED", "FAIL_SYS_USER_NOT_LOGIN")):
+        raise LoginRequiredError("site_login_required")
+
+
+async def scrape_user_profile(context, user_id: str, *, ass_session: Optional[BrowserSession] = None) -> dict:
     """
     【新版】访问指定用户的个人主页，按顺序采集其摘要信息、完整的商品列表和完整的评价列表。
     """
     print(f"   -> 开始采集用户ID: {user_id} 的完整信息...")
     profile_data = {}
-    page = await context.new_page()
+    page = await _new_task_page(context, ass_session)
 
     # 为各项异步任务准备Future和数据容器
     head_api_future = asyncio.get_event_loop().create_future()
@@ -433,7 +518,7 @@ async def scrape_user_profile(context, user_id: str) -> dict:
             print("      [警告] 未找到评价选项卡，跳过评价采集。")
 
     except Exception as e:
-        print(f"   [错误] 采集用户 {user_id} 信息时发生错误: {e}")
+        print(f"   [错误] 采集用户 {user_id} 信息时发生错误: {_public_error(e, ass_session is not None)}")
     finally:
         page.remove_listener("response", handle_response)
         await page.close()
@@ -447,6 +532,7 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
     【核心执行器】
     根据单个任务配置，异步爬取闲鱼商品数据，并对每个新发现的商品进行实时的、独立的AI分析和通知。
     """
+    ass_mode = uses_ass_account(task_config)
     keyword = task_config["keyword"]
     max_pages = task_config.get("max_pages", 1)
     personal_only = task_config.get("personal_only", False)
@@ -477,7 +563,7 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
         print(f"LOG: 结果集 {result_filename} 当前为空，将写入新记录。")
 
     rotation_settings = _get_rotation_settings(task_config)
-    account_items = load_state_files(rotation_settings["account_state_dir"])
+    account_items = [] if ass_mode else load_state_files(rotation_settings["account_state_dir"])
     runtime_plan = resolve_account_runtime_plan(
         strategy=task_config.get("account_strategy"),
         account_state_file=task_config.get("account_state_file"),
@@ -535,19 +621,26 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
         picked = proxy_pool.pick_random()
         return picked or selected_proxy
 
-    async def _run_scrape_attempt(state_file: str, proxy_server: Optional[str]) -> int:
+    async def _run_scrape_attempt(state_file: Optional[str], proxy_server: Optional[str]) -> int:
         processed_item_count = 0
         stop_scraping = False
-
-        if not os.path.exists(state_file):
-            raise FileNotFoundError(f"登录状态文件不存在: {state_file}")
-
+        ass_session = None
         snapshot_data = None
-        try:
-            with open(state_file, "r", encoding="utf-8") as f:
-                snapshot_data = json.load(f)
-        except Exception as e:
-            print(f"警告：读取登录状态文件失败，将直接按路径使用: {e}")
+        if ass_mode:
+            # 每次新浏览器尝试都重新鉴权；禁止把值写成临时state文件或本地fallback。
+            ass_session = await asyncio.to_thread(AssSessionClient(AssSessionSettings.from_env()).read)
+            if ass_session.observed_age_seconds > 3600:
+                print("ASS观察时间较旧，不代表登录失效；仍由网站验证，未刷新原时间。")
+            if ass_session.mixed:
+                print("ASS显式允许混合会话：页面数据沿用旧基线，不保证同一登录代际。")
+        else:
+            if not state_file or not os.path.exists(state_file):
+                raise FileNotFoundError(f"登录状态文件不存在: {state_file}")
+            try:
+                with open(state_file, "r", encoding="utf-8") as f:
+                    snapshot_data = json.load(f)
+            except Exception as e:
+                print(f"警告：读取登录状态文件失败，将直接按路径使用: {e}")
 
         async with async_playwright() as p:
             # 反检测启动参数
@@ -560,6 +653,11 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                 "--disable-features=IsolateOrigins,site-per-process",
             ]
 
+            if ass_mode:
+                # 页面存储含凭据，ASS路径保留浏览器同源/站点隔离，不沿用旧弱化开关。
+                launch_args = [arg for arg in launch_args if arg not in {
+                    "--disable-web-security", "--disable-features=IsolateOrigins,site-per-process"
+                }]
             launch_kwargs = {"headless": RUN_HEADLESS, "args": launch_args}
             if proxy_server:
                 launch_kwargs["proxy"] = {"server": proxy_server}
@@ -588,9 +686,17 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                     storage_state_arg = snapshot_data
 
             context_kwargs = _clean_kwargs(context_kwargs)
-            context = await browser.new_context(
-                storage_state=storage_state_arg, **context_kwargs
-            )
+            if ass_session is not None:
+                try:
+                    context = await _new_ass_context(browser, ass_session)
+                except BaseException:
+                    try:
+                        await browser.close()
+                    except Exception:
+                        pass
+                    raise
+            else:
+                context = await browser.new_context(storage_state=storage_state_arg, **context_kwargs)
             seller_profile_cache = SellerProfileCache(
                 ttl_seconds=_get_seller_profile_cache_ttl(task_config)
             )
@@ -599,7 +705,7 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                 skip_ai_analysis=SKIP_AI_ANALYSIS,
                 seller_loader=lambda user_id: seller_profile_cache.get_or_load(
                     str(user_id),
-                    lambda seller_key: scrape_user_profile(context, seller_key),
+                    lambda seller_key: scrape_user_profile(context, seller_key, ass_session=ass_session),
                 ),
                 image_downloader=download_all_images,
                 ai_analyzer=get_ai_analysis,
@@ -608,7 +714,8 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
             )
 
             # 增强反检测脚本（模拟真实移动设备）
-            await context.add_init_script("""
+            if not ass_mode:
+                await context.add_init_script("""
                 // 移除webdriver标识
                 Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
 
@@ -631,7 +738,7 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                 );
             """)
 
-            page = await context.new_page()
+            page = await _new_task_page(context, ass_session)
 
             try:
                 # 步骤 0 - 模拟真实用户：先访问首页（重要的反检测措施）
@@ -756,7 +863,7 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                             f"新发布筛选 '{new_publish_option}' 请求超时，继续执行。"
                         )
                     except Exception as e:
-                        print(f"LOG: 应用新发布筛选失败: {e}")
+                        print(f"LOG: 应用新发布筛选失败: {_public_error(e, ass_mode)}")
 
                 if personal_only:
                     async with page.expect_response(
@@ -778,7 +885,7 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                     except PlaywrightTimeoutError:
                         log_time("包邮筛选请求超时，继续执行。")
                     except Exception as e:
-                        print(f"LOG: 应用包邮筛选失败: {e}")
+                        print(f"LOG: 应用包邮筛选失败: {_public_error(e, ass_mode)}")
 
                 if region_filter:
                     try:
@@ -879,7 +986,7 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                     except PlaywrightTimeoutError:
                         log_time(f"区域筛选 '{region_filter}' 请求超时，继续执行。")
                     except Exception as e:
-                        print(f"LOG: 应用区域筛选 '{region_filter}' 失败: {e}")
+                        print(f"LOG: 应用区域筛选 '{region_filter}' 失败: {_public_error(e, ass_mode)}")
 
                 if min_price or max_price:
                     price_container = page.locator(
@@ -936,9 +1043,10 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                         log_time(f"第 {page_num} 页响应无效，跳过。")
                         continue
 
-                    basic_items = await _parse_search_results_json(
-                        await current_response.json(), f"第 {page_num} 页"
-                    )
+                    search_data = await current_response.json()
+                    if ass_mode:
+                        _check_ass_site_response(search_data)
+                    basic_items = await _parse_search_results_json(search_data, f"第 {page_num} 页")
                     if not basic_items:
                         break
                     historical_snapshots.extend(
@@ -974,7 +1082,7 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                         # --- 修改: 访问详情页前的等待时间，模拟用户在列表页上看了一会儿 ---
                         await random_sleep(2, 4)  # 原来是 (2, 4)
 
-                        detail_page = await context.new_page()
+                        detail_page = await _new_task_page(context, ass_session)
                         try:
                             async with detail_page.expect_response(
                                 lambda r: DETAIL_API_URL_PATTERN in r.url, timeout=25000
@@ -988,6 +1096,8 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                             detail_response = await detail_info.value
                             if detail_response.ok:
                                 detail_json = await detail_response.json()
+                                if ass_mode:
+                                    _check_ass_site_response(detail_json)
 
                                 ret_string = str(
                                     await safe_get(detail_json, "ret", default=[])
@@ -1115,7 +1225,7 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                                 print(
                                     f"   错误: 获取商品详情API响应失败，状态码: {detail_response.status}"
                                 )
-                                if AI_DEBUG_MODE:
+                                if AI_DEBUG_MODE and not ass_mode:
                                     print(
                                         f"--- [DETAIL DEBUG] FAILED RESPONSE from {item_data['商品链接']} ---"
                                     )
@@ -1127,10 +1237,12 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                                         "----------------------------------------------------"
                                     )
 
+                        except (AssCredentialsError, LoginRequiredError, RiskControlError):
+                            raise
                         except PlaywrightTimeoutError:
                             print(f"   错误: 访问商品详情页或等待API响应超时。")
                         except Exception as e:
-                            print(f"   错误: 处理商品详情时发生未知错误: {e}")
+                            print(f"   错误: 处理商品详情时发生未知错误: {_public_error(e, ass_mode)}")
                         finally:
                             await detail_page.close()
                             # --- 修改: 增加关闭页面后的短暂整理时间 ---
@@ -1148,20 +1260,22 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                     raise LoginRequiredError(
                         f"Login required: redirected to {page.url} (cookies/state likely expired)"
                     ) from e
-                print(f"\n操作超时错误: 页面元素或网络响应未在规定时间内出现。\n{e}")
+                print(f"\n操作超时错误: 页面元素或网络响应未在规定时间内出现。\n{_public_error(e, ass_mode)}")
                 raise
             except asyncio.CancelledError:
                 log_time("收到取消信号，正在终止当前爬虫任务...")
                 raise
             except Exception as e:
                 if type(e).__name__ == "TargetClosedError":
+                    if ass_mode:
+                        raise AssCredentialsError("ass_browser_context_closed") from None
                     log_time("浏览器已关闭，忽略后续异常（可能是任务被停止）。")
                     return processed_item_count
                 if "passport.goofish.com" in str(e):
                     raise LoginRequiredError(
                         f"Login required: redirected to passport flow ({e})"
                     ) from e
-                print(f"\n爬取过程中发生未知错误: {e}")
+                print(f"\n爬取过程中发生未知错误: {_public_error(e, ass_mode)}")
                 raise
             finally:
                 if analysis_dispatcher is not None:
@@ -1187,12 +1301,12 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
     # If this task is already in a paused state, skip immediately.
     task_name_for_guard = task_config.get("task_name", "未命名任务")
     pause_cookie_path = None
-    if (
+    if not ass_mode and (
         isinstance(task_config.get("account_state_file"), str)
         and task_config.get("account_state_file").strip()
     ):
         pause_cookie_path = task_config.get("account_state_file").strip()
-    elif os.path.exists(STATE_FILE):
+    elif not ass_mode and os.path.exists(STATE_FILE):
         pause_cookie_path = STATE_FILE
 
     decision = FAILURE_GUARD.should_skip_start(
@@ -1214,7 +1328,7 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                     f"原因: {decision.reason}\n"
                     f"连续失败: {decision.consecutive_failures}/{FAILURE_GUARD.threshold}\n"
                     f"暂停到: {decision.paused_until.strftime('%Y-%m-%d %H:%M:%S') if decision.paused_until else 'N/A'}\n"
-                    "修复方法: 更新登录态/cookies文件后会自动恢复。",
+                    "请检查所选账号来源；ASS的观察时间或snapshot变化不会自动解除网站暂停。",
                 )
             except Exception as e:
                 print(f"发送任务暂停通知失败: {e}")
@@ -1224,7 +1338,7 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
 
     for attempt in range(1, attempt_limit + 1):
         if attempt == 1:
-            selected_account = _select_account()
+            selected_account = None if ass_mode else _select_account()
             selected_proxy = _select_proxy()
         else:
             if (
@@ -1244,7 +1358,7 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
             last_error = "未找到可用的登录状态文件，无法继续执行任务。"
             print(last_error)
             break
-        if not rotation_settings["account_enabled"] and not selected_account:
+        if not ass_mode and not rotation_settings["account_enabled"] and not selected_account:
             last_error = "未找到可用的登录状态文件，无法继续执行任务。"
             print(last_error)
             break
@@ -1253,7 +1367,7 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
             print(last_error)
             break
 
-        state_path = selected_account.value if selected_account else STATE_FILE
+        state_path = None if ass_mode else (selected_account.value if selected_account else STATE_FILE)
         last_state_path = state_path
         proxy_server = selected_proxy.value if selected_proxy else None
         if rotation_settings["account_enabled"]:
@@ -1266,17 +1380,22 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
             last_error = ""
             FAILURE_GUARD.record_success(task_name_for_guard)
             break
+        except AssCredentialsError as e:
+            # 来源错误不是网站登录失败，不叠加风控计数，也不把任务标为成功。
+            print(f"ASS来源本次不可用: {e}")
+            cleanup_task_images(task_config.get("task_name", "default"))
+            return processed_item_count
         except LoginRequiredError as e:
-            last_error = str(e)
-            print(f"检测到登录失效/重定向: {e}")
+            last_error = "site_login_required" if ass_mode else str(e)
+            print(f"检测到登录失效/重定向: {last_error}")
             break
         except RiskControlError as e:
-            last_error = str(e)
-            print(f"检测到风控或验证触发: {e}")
+            last_error = "site_risk_control" if ass_mode else str(e)
+            print(f"检测到风控或验证触发: {last_error}")
             # 风控验证通常不是简单轮换能解决的，避免无意义重试。
             break
         except Exception as e:
-            last_error = f"{type(e).__name__}: {e}"
+            last_error = "browser_operation_failed" if ass_mode else f"{type(e).__name__}: {e}"
             print(f"本次尝试失败: {last_error}")
             if attempt < attempt_limit:
                 print("将尝试轮换账号/IP 后重试...")

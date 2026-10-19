@@ -64,15 +64,18 @@ def _extract_keywords_from_legacy_groups(groups) -> List[str]:
     return _normalize_keyword_values(merged)
 
 
-def _normalize_payload_keywords(payload: Any) -> Any:
+def _normalize_payload_keywords(payload: Any, *, partial: bool = False) -> Any:
     if payload is None or not isinstance(payload, dict):
         return payload
     values = dict(payload)
-    values["account_state_file"] = clean_account_state_file(values.get("account_state_file"))
-    values["account_strategy"] = normalize_account_strategy(
-        values.get("account_strategy"),
-        values.get("account_state_file"),
-    )
+    if not partial or "account_state_file" in values:
+        values["account_state_file"] = clean_account_state_file(values.get("account_state_file"))
+    if not partial or "account_strategy" in values:
+        values["account_strategy"] = normalize_account_strategy(
+            values.get("account_strategy"), values.get("account_state_file"),
+        )
+        if values["account_strategy"] == "ass":
+            values["account_state_file"] = None
     if "keyword_rules" in values:
         values["keyword_rules"] = _normalize_keyword_values(values.get("keyword_rules"))
     elif "keyword_rule_groups" in values:
@@ -123,7 +126,7 @@ class Task(BaseModel):
     ai_prompt_base_file: str
     ai_prompt_criteria_file: str
     account_state_file: Optional[str] = None
-    account_strategy: Literal["auto", "fixed", "rotate"] = "auto"
+    account_strategy: Literal["auto", "fixed", "rotate", "ass"] = "auto"
     free_shipping: bool = True
     new_publish_option: Optional[str] = None
     region: Optional[str] = None
@@ -173,7 +176,7 @@ class TaskCreate(BaseModel):
     ai_prompt_base_file: str = "prompts/base_prompt.txt"
     ai_prompt_criteria_file: str = ""
     account_state_file: Optional[str] = None
-    account_strategy: Literal["auto", "fixed", "rotate"] = "auto"
+    account_strategy: Literal["auto", "fixed", "rotate", "ass"] = "auto"
     free_shipping: bool = True
     new_publish_option: Optional[str] = None
     region: Optional[str] = None
@@ -240,7 +243,7 @@ class TaskUpdate(BaseModel):
     ai_prompt_base_file: Optional[str] = None
     ai_prompt_criteria_file: Optional[str] = None
     account_state_file: Optional[str] = None
-    account_strategy: Optional[Literal["auto", "fixed", "rotate"]] = None
+    account_strategy: Optional[Literal["auto", "fixed", "rotate", "ass"]] = None
     free_shipping: Optional[bool] = None
     new_publish_option: Optional[str] = None
     region: Optional[str] = None
@@ -251,7 +254,7 @@ class TaskUpdate(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def normalize_legacy_keyword_payload(cls, values):
-        return _normalize_payload_keywords(values)
+        return _normalize_payload_keywords(values, partial=True)
 
     @field_validator("min_price", "max_price", mode="before")
     @classmethod
@@ -304,7 +307,7 @@ class TaskGenerateRequest(BaseModel):
     max_pages: int = 3
     cron: Optional[str] = None
     account_state_file: Optional[str] = None
-    account_strategy: Literal["auto", "fixed", "rotate"] = "auto"
+    account_strategy: Literal["auto", "fixed", "rotate", "ass"] = "auto"
     free_shipping: bool = True
     new_publish_option: Optional[str] = None
     region: Optional[str] = None

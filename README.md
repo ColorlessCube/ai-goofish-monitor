@@ -81,9 +81,15 @@ docker compose up -d
 ### 第一次使用
 
 1. 打开默认 Web UI `http://127.0.0.1:8000` 并登录。
-2. 进入“闲鱼账号管理”，使用 [Chrome 扩展](https://chromewebstore.google.com/detail/xianyu-login-state-extrac/eidlpfjiodpigmfcahkmlenhppfklcoa) 导出并粘贴闲鱼登录态 JSON。
+2. 本地账号模式：进入“闲鱼账号管理”，使用 [Chrome 扩展](https://chromewebstore.google.com/detail/xianyu-login-state-extrac/eidlpfjiodpigmfcahkmlenhppfklcoa) 导出并粘贴闲鱼登录态 JSON。
 3. 登录态文件会保存到 `state/` 目录，例如 `state/acc_1.json`。
 4. 回到“任务管理”，创建任务并绑定账号后即可运行。
+
+### 可选：ASS 账户来源（本地已实现，未部署）
+
+已有ASS通用浏览器会话时，可由管理员配置服务端精确引用/独立Read Key只读文件，再在任务账号策略选择“ASS 服务端会话”。支持完整包和明确opt-in的混合包，仅内存恢复Cookie及存储，不回退本地文件、不自动切账号，也不因新snapshot解除风控。原任务默认不变；不在页面或.env填原始Key。
+
+配置、兼容策略、验证边界及离线截图见[ASS账号来源](docs/ass-account-source.md)。这不是已部署或已验证真实闲鱼业务的声明。
 
 ### 创建第一个任务
 

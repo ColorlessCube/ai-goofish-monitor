@@ -10,6 +10,7 @@ import re
 from src.config import STATE_FILE
 from src.infrastructure.persistence.sqlite_task_repository import SqliteTaskRepository
 from src.scraper import scrape_xianyu
+from src.services.account_strategy_service import uses_ass_account
 
 
 async def main():
@@ -91,7 +92,8 @@ async def main():
                     return True
         return False
 
-    if not os.path.exists(STATE_FILE) and not has_bound_account(tasks_config) and not has_any_state_file():
+    if (not any(uses_ass_account(task) for task in tasks_config)
+            and not os.path.exists(STATE_FILE) and not has_bound_account(tasks_config) and not has_any_state_file()):
         sys.exit(
             f"错误: 未找到登录状态文件。请在 state/ 中添加账号或配置 account_state_file。"
         )

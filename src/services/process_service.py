@@ -55,10 +55,13 @@ class ProcessService:
         """Best-effort cookie/state path for a task."""
         try:
             task = find_task_by_name_sync(task_name)
+            if task and getattr(task, "account_strategy", None) == "ass":
+                return None
             if task and isinstance(task.account_state_file, str) and task.account_state_file.strip():
                 return task.account_state_file.strip()
         except Exception:
-            pass
+            # 无法确认来源时，不允许本地文件mtime误解除远端账号的暂停。
+            return None
 
         return STATE_FILE if os.path.exists(STATE_FILE) else None
 
@@ -178,7 +181,7 @@ class ProcessService:
                 f"原因: {decision.reason}\n"
                 f"连续失败: {decision.consecutive_failures}/{self.failure_guard.threshold}\n"
                 f"暂停到: {decision.paused_until.strftime('%Y-%m-%d %H:%M:%S') if decision.paused_until else 'N/A'}\n"
-                "修复方法: 更新登录态/cookies文件后会自动恢复。",
+                "请检查所选账号来源；ASS的观察时间或snapshot变化不会自动解除网站暂停。",
             )
         except Exception as exc:
             print(f"发送任务暂停通知失败: {exc}")

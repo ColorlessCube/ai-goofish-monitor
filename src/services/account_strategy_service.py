@@ -4,7 +4,12 @@
 from typing import Optional
 
 
-ACCOUNT_STRATEGIES = {"auto", "fixed", "rotate"}
+ACCOUNT_STRATEGIES = {"auto", "fixed", "rotate", "ass"}
+
+
+def uses_ass_account(task_config: dict) -> bool:
+    """只有显式ASS策略使用远端来源，其他策略不随环境变量自动切换。"""
+    return task_config.get("account_strategy") == "ass"
 
 
 def clean_account_state_file(value: Optional[str]) -> Optional[str]:
@@ -38,6 +43,9 @@ def resolve_account_runtime_plan(
     normalized_strategy = normalize_account_strategy(strategy, account_state_file)
     cleaned_account = clean_account_state_file(account_state_file)
     has_account_pool = len(available_account_files) > 0
+
+    if normalized_strategy == "ass":
+        return {"strategy": "ass", "forced_account": None, "use_account_pool": False, "prefer_root_state": False}
 
     if normalized_strategy == "fixed":
         return {
