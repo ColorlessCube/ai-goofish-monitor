@@ -4,7 +4,9 @@
 
 `master` 的每次推送会运行：Python 非 live 测试、Vue 前端构建、带源码 provenance label 的 release image 构建，以及 NAS Compose 模板解析。通过后，`Deliver main to NAS` 会将同一份已测试镜像发布为私有 GHCR 的不可变 `build-<完整 commit SHA>` 标签，并上传包含固定 digest 和 Compose 基线的部署 manifest。
 
-当前仓库没有启用 `NAS_DEPLOY_ENABLED=true`，因此不会连接 NAS、不会替换当前闲鱼监控容器，也不会修改 SQLite、登录 state、Cookie 或监控任务。该开关和 NAS 端的 service policy 都必须独立启用，双重条件缺一不可。
+当前仓库没有启用 `NAS_DEPLOY_ENABLED=true`，因此自动 delivery 不连接 NAS，也不修改生产容器或数据。该开关和 NAS 端的 service policy 都必须独立启用，双重条件缺一不可。2026-10-19已另获批准，以测试原镜像固定digest**手动**完成首次Fork交付，见[ASS账号来源交付记录](records/ass-account-source-20261019.md)；这不是自动通道已接通的声明。
+
+旧 `Docker Image CI on merge to master` 工作流已在GitHub禁用，避免合并PR时再发布另一份未经本通道验证的`latest`。发布继续使用delivery中的同份测试镜像和不可变标签；不要为重试NAS下载而重跑publisher。
 
 ## 共享工具链
 

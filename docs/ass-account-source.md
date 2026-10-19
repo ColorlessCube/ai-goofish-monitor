@@ -1,6 +1,6 @@
-# ASS 账号来源（本地实现，未部署）
+# ASS 账号来源
 
-Goofish是现有ASS通用浏览器会话的普通消费者，不增加Goofish专用服务端、协议、采集扩展或任务回调。实现基于本地`feat/service-api-auth-and-mcp`（9e4d75a），本轮只在独立功能分支修改，不推送/部署/签发真实Key/扩大grant或触发真实任务；不能据此认为NAS旧上游镜像已经支持。
+Goofish是现有ASS通用浏览器会话的普通消费者，不增加Goofish专用服务端、协议、采集扩展或任务回调。功能已随PR #8合入`master`，并于2026-10-19经用户批准以固定digest手动部署到NAS；独立Read Key、正式HTTPS页面配置和原参数常规任务运行结果见[首次交付记录](records/ass-account-source-20261019.md)。自动NAS交付通道尚未启用，不把镜像发布等同于自动部署成功。
 
 ## 选择来源
 
@@ -29,7 +29,7 @@ ASS_UNSPECIFIED_SAMESITE=reject
 ```
 
 - 由用户另行批准ASS管理员签发/配置Goofish独立Read Key，仅`rest`，scope仅metadata/read + value/read，**精确授权这一个会话UUID**，不授租户、不复用MoviePilot或采集Key。当前消费者要求active_grant_count=1。
-- Key不填进.env、任务、前端、URL或命令参数；仅从容器内受保护普通文件读取，推荐只读单文件挂载、0400（接受0600），owner为root/运行用户，拒绝链接/特殊文件/组其他权限/执行位。不实现Key签发/轮换或自动部署挂载。使用POSIX文件保护，不在无法确认NOFOLLOW的平台静默弱化检查。
+- Key不填进.env、任务、前端、URL或命令参数；仅从容器内受保护普通文件读取，推荐只读单文件挂载、0400（接受0600），owner为root/运行用户，拒绝链接/特殊文件/组其他权限/执行位。应用不自动签发/轮换Key或部署挂载，需管理员单独配置；本次已批准的NAS配置见交付记录。使用POSIX文件保护，不在无法确认NOFOLLOW的平台静默弱化检查。
 - 名称+UUID、tenant、site/account、来源共同固定；当前仅消费`https://www.goofish.com`单来源包，多来源或旧Cookie协议拒绝，不能把其他网站凭据混入。新建/删除重建同名项不能自动扩大授权。
 - `ASS_ALLOW_MIXED=true`是明确接受新Cookie+旧页面组的代际风险；默认完整投影拒绝mixed。即使同Profile/producer或账号标签，也不证明同一个真实登录用户，切换来源/账号前要停任务、人工验证并评估原结果/失败状态，不自动清空业务数据。
 - Chrome的未指定SameSite在Playwright不能无损表达，默认报`ass_cookie_samesite_unrepresentable`，**不丢Cookie或静默改Lax**；只有用户明确接受语义归一后设置`ASS_UNSPECIFIED_SAMESITE=lax`。SameSite=None必须Secure；分区/非store0/重复物理身份等拒绝。
@@ -62,4 +62,4 @@ cd web-ui
 npm run build
 ```
 
-可选原生浏览器测试检测已有Chrome/Chromium，无浏览器则skip，不下载或使用用户Profile。生产Key/grant、部署固定digest/受限SSH/挂载、切换真实任务与单任务无AI无通知试点需后续明确授权；不顺带发布基础分支尚未上线的auth/MCP能力。
+可选原生浏览器测试检测已有Chrome/Chromium，无浏览器则skip，不下载或使用用户Profile。后续新增或扩大Key/grant、切换其他任务、修改部署通道仍需明确授权。本次用户已批准首次Fork部署并明确按Goofish常规流程测试，实际保留原3页上限、AI/图片分析及通知配置；仅任务8切为ASS，其他任务保持原来源。已部署的基础auth/MCP与未接入的外部客户端、实际业务和未发生的通知投递应分别说明，不能将本地验证或读取成功当成全部线上环节成功。
