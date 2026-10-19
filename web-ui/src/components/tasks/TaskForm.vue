@@ -30,7 +30,7 @@ const emit = defineEmits<{
 const { t } = useI18n()
 
 const form = ref<any>({})
-const accountStrategy = ref<'auto' | 'fixed' | 'rotate'>('auto')
+const accountStrategy = ref<'auto' | 'fixed' | 'rotate' | 'ass'>('auto')
 const selectedAccountStateFile = ref(AUTO_ACCOUNT_VALUE)
 const keywordRulesInput = ref('')
 const cronMode = ref<'preset' | 'custom'>('preset')
@@ -74,6 +74,7 @@ const accountStrategyOptions = computed(() => [
   { value: 'auto', label: t('tasks.form.accountStrategy.auto'), description: t('tasks.form.accountStrategy.autoDescription') },
   { value: 'fixed', label: t('tasks.form.accountStrategy.fixed'), description: t('tasks.form.accountStrategy.fixedDescription') },
   { value: 'rotate', label: t('tasks.form.accountStrategy.rotate'), description: t('tasks.form.accountStrategy.rotateDescription') },
+  { value: 'ass', label: t('tasks.form.accountStrategy.ass'), description: t('tasks.form.accountStrategy.assDescription') },
 ])
 
 function parseKeywordText(text: string): string[] {
@@ -175,7 +176,7 @@ watch(selectedAccountStateFile, (value) => {
 })
 
 function handleAccountStrategyChange(event: Event) {
-  const value = (event.target as HTMLSelectElement).value as 'auto' | 'fixed' | 'rotate'
+  const value = (event.target as HTMLSelectElement).value as 'auto' | 'fixed' | 'rotate' | 'ass'
   accountStrategy.value = value
 }
 

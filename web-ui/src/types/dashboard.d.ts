@@ -18,7 +18,7 @@ export interface DashboardTaskSummary {
   filename: string | null
   enabled: boolean
   is_running: boolean
-  account_strategy: 'auto' | 'fixed' | 'rotate'
+  account_strategy: 'auto' | 'fixed' | 'rotate' | 'ass'
   cron: string | null
   region: string | null
   total_items: number

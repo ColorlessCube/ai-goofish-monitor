@@ -12,6 +12,10 @@ The service separates browser administration from machine read access.
 
 `GOOFISH_SESSION_SECRET` and `GOOFISH_MCP_READ_TOKEN` are required for protected production access. Store them in Infisical / deployment secrets only; never commit them, put them in CI logs, or reuse the administrator password as a token.
 
+## ASS account-source metadata
+
+Task create/update/generate now accept `account_strategy: "ass"`. Only authenticated administrators can select or change it; it does not grant an ASS credential or a new machine write scope. Task responses and readonly MCP may show this strategy, never the ASS Key or session payload. ASS connection/target references are server-injected and the Key is a protected file, not a task field or an agent value-reading tool. Existing task strategies remain unchanged; partial edits do not switch ASS tasks back to local accounts. See [ASS account source](ass-account-source.md) for the separate consumer credential and local-only implementation boundary.
+
 ## Local stdio MCP adapter
 
 The adapter lives in `src/mcp/goofish_readonly.py`. It is designed to run on the Hermes host and is not a NAS daemon.

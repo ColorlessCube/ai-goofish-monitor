@@ -45,14 +45,19 @@ def _has_keyword_rules(rules) -> bool:
 def _validate_final_account_strategy(existing_task, task_update: TaskUpdate) -> None:
     account_state_file = (
         task_update.account_state_file
-        if task_update.account_state_file is not None
+        if "account_state_file" in task_update.model_fields_set
         else existing_task.account_state_file
     )
-    account_strategy = normalize_account_strategy(
-        task_update.account_strategy,
-        account_state_file,
-    )
+    if "account_strategy" in task_update.model_fields_set:
+        strategy = task_update.account_strategy
+    elif existing_task.account_strategy == "ass" or "account_state_file" not in task_update.model_fields_set:
+        strategy = existing_task.account_strategy
+    else:
+        strategy = None
+    account_strategy = normalize_account_strategy(strategy, account_state_file)
     task_update.account_strategy = account_strategy
+    if account_strategy == "ass":
+        task_update.account_state_file = None
     if account_strategy == "fixed" and not account_state_file:
         raise HTTPException(status_code=400, detail="固定账号模式下必须选择账号。")
 @router.get("", response_model=List[dict])

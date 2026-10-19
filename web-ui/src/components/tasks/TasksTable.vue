@@ -55,12 +55,14 @@ onBeforeUnmount(() => {
 })
 
 const resolveAccountStrategyLabel = (task: Task) => {
+  if (task.account_strategy === 'ass') return 'ASS'
   if (task.account_strategy === 'rotate') return t('tasks.table.accountRotate')
   if (task.account_strategy === 'fixed') return t('tasks.table.accountFixed')
   return t('tasks.table.accountAuto')
 }
 
 const resolveAccountName = (task: Task) => {
+  if (task.account_strategy === 'ass') return t('tasks.form.accountStrategy.ass')
   if (!task.account_state_file) return t('tasks.table.systemSelected')
   const segments = task.account_state_file.split('/')
   const filename = segments[segments.length - 1] || task.account_state_file

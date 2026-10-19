@@ -102,6 +102,8 @@ const zhCNExtra = {
         fixedDescription: '当前任务始终绑定一个指定账号。',
         rotate: '轮换账号',
         rotateDescription: '当前任务强制使用账号池轮换。',
+        ass: 'ASS 服务端会话',
+        assDescription: '使用服务端精确绑定的 ASS 账户；不回退本地、不轮换账号。Read Key仅从服务端受保护文件读取，配置不完整时任务会停止。',
       },
       publishOptions: { none: '不筛选（默认）', latest: '最新', oneDay: '1天内', threeDays: '3天内', sevenDays: '7天内', fourteenDays: '14天内' },
       validation: {
