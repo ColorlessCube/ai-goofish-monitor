@@ -25,6 +25,11 @@ LABEL org.opencontainers.image.revision="${VCS_REF}" \
 
 WORKDIR /app
 
+# Apply the tracked runtime requirements, not only those baked into the base.
+COPY requirements-runtime.txt /tmp/requirements-runtime.txt
+RUN python -m pip install --no-cache-dir -r /tmp/requirements-runtime.txt \
+    && rm /tmp/requirements-runtime.txt
+
 COPY --from=frontend-builder /dist /app/dist
 
 COPY src /app/src

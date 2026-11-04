@@ -25,7 +25,7 @@ export interface Task {
   is_running: boolean;
 }
 
-export type TaskGenerationStatus = 'queued' | 'running' | 'completed' | 'failed';
+export type TaskGenerationStatus = 'queued' | 'running' | 'completed' | 'failed' | 'partial_success' | 'unknown';
 export type TaskGenerationStepStatus = 'pending' | 'running' | 'completed' | 'failed';
 
 export interface TaskGenerationStep {
@@ -35,20 +35,34 @@ export interface TaskGenerationStep {
   message: string;
 }
 
-export interface TaskGenerationJob {
-  job_id: string;
-  task_name: string;
-  status: TaskGenerationStatus;
-  message: string;
-  current_step: string | null;
-  steps: TaskGenerationStep[];
-  task: Task | null;
-  error: string | null;
+// Durable receipts contain the creation-time model, not a live task lookup.
+export interface GeneratedTaskSnapshot extends Omit<Task, 'id' | 'description'> {
+  id: number | null;
+  description?: string | null;
+  instance_id?: string;
+  config_version?: number;
 }
 
-export interface TaskCreateResponse {
-  message: string;
-  task?: Task;
+// Synchronous keyword receipts do not have a server-side generation job.
+export interface TaskGenerationReceipt {
+  job_id?: string;
+  status: TaskGenerationStatus;
+  // Restart/missing-history receipts may only contain job_id/status/retry_safe.
+  task_name?: string;
+  message?: string;
+  current_step?: string | null;
+  steps?: TaskGenerationStep[];
+  task?: GeneratedTaskSnapshot | null;
+  error?: string | null;
+  task_committed?: boolean | null;
+  retry_safe?: boolean;
+}
+
+export interface TaskGenerationJob extends TaskGenerationReceipt {
+  job_id: string;
+}
+
+export interface TaskCreateResponse extends Partial<TaskGenerationReceipt> {
   job?: TaskGenerationJob;
 }
 

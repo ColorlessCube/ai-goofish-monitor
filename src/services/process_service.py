@@ -14,7 +14,7 @@ from typing import Awaitable, Callable, Dict, TextIO
 from src.ai_handler import send_ntfy_notification
 from src.config import STATE_FILE
 from src.failure_guard import FailureGuard
-from src.infrastructure.persistence.sqlite_task_repository import find_task_by_name_sync
+from src.infrastructure.persistence.sqlite_task_repository import find_task_by_name_sync, find_task_by_id_sync
 from src.utils import build_task_log_path
 
 STOP_TIMEOUT_SECONDS = 20
@@ -51,10 +51,10 @@ class ProcessService:
         if asyncio.iscoroutine(result):
             await result
 
-    def _resolve_cookie_path(self, task_name: str) -> str | None:
+    def _resolve_cookie_path(self, task_name: str, task_id=None) -> str | None:
         """Best-effort cookie/state path for a task."""
         try:
-            task = find_task_by_name_sync(task_name)
+            task = find_task_by_id_sync(task_id) if task_id is not None else find_task_by_name_sync(task_name)
             if task and getattr(task, "account_strategy", None) == "ass":
                 return None
             if task and isinstance(task.account_state_file, str) and task.account_state_file.strip():
@@ -89,14 +89,15 @@ class ProcessService:
         log_file_handle = open(log_file_path, "a", encoding="utf-8")
         return log_file_path, log_file_handle
 
-    def _build_spawn_command(self, task_name: str) -> list[str]:
-        command = [
-            sys.executable,
-            "-u",
-            "spider_v2.py",
-            "--task-name",
-            task_name,
-        ]
+    def _build_spawn_command(self, task_name: str, *, task_id=None, instance_id=None, config_version=None) -> list[str]:
+        command = [sys.executable, "-u", "spider_v2.py"]
+        if task_id is not None and instance_id:
+            command.extend(["--task-id", str(task_id), "--task-instance", instance_id])
+            if config_version is None:
+                raise ValueError("a bound task start requires config_version")
+            command.extend(["--expected-config-version", str(config_version)])
+        else:
+            command.extend(["--task-name", task_name])
         debug_limit = str(os.getenv(SPIDER_DEBUG_LIMIT_ENV, "")).strip()
         if debug_limit.isdigit() and int(debug_limit) > 0:
             command.extend(["--debug-limit", debug_limit])
@@ -106,13 +107,14 @@ class ProcessService:
         self,
         task_name: str,
         log_file_handle: TextIO,
+        *, task_id: int, instance_id: str, config_version: int,
     ) -> asyncio.subprocess.Process:
         preexec_fn = os.setsid if sys.platform != "win32" else None
         child_env = os.environ.copy()
         child_env["PYTHONIOENCODING"] = "utf-8"
         child_env["PYTHONUTF8"] = "1"
         return await asyncio.create_subprocess_exec(
-            *self._build_spawn_command(task_name),
+            *self._build_spawn_command(task_name, task_id=task_id, instance_id=instance_id, config_version=config_version),
             stdout=log_file_handle,
             stderr=log_file_handle,
             preexec_fn=preexec_fn,
@@ -133,8 +135,13 @@ class ProcessService:
         self.task_names[task_id] = task_name
         self.exit_watchers[task_id] = asyncio.create_task(self._watch_process_exit(process))
 
-    async def start_task(self, task_id: int, task_name: str) -> bool:
-        """启动任务进程"""
+    async def start_task(self, task_id: int, task_name: str, *, instance_id=None, config_version=None) -> bool:
+        """Resolve the authorized ID/instance, never a mutable display name."""
+        task = await asyncio.to_thread(find_task_by_id_sync, task_id, instance_id)
+        if task is None or not task.enabled or task.task_name != task_name:
+            return False
+        if config_version is not None and task.config_version != config_version:
+            return False
         await self._drain_finished_process(task_id)
         if self.is_running(task_id):
             print(f"任务 '{task_name}' (ID: {task_id}) 已在运行中")
@@ -142,7 +149,7 @@ class ProcessService:
 
         decision = self.failure_guard.should_skip_start(
             task_name,
-            cookie_path=self._resolve_cookie_path(task_name),
+            cookie_path=self._resolve_cookie_path(task_name, task_id),
         )
         if decision.skip:
             await self._notify_skip(task_name, decision)
@@ -152,7 +159,7 @@ class ProcessService:
         log_file_handle = None
         try:
             log_file_path, log_file_handle = self._open_log_file(task_id, task_name)
-            process = await self._spawn_process(task_name, log_file_handle)
+            process = await self._spawn_process(task_name, log_file_handle, task_id=task.id, instance_id=task.instance_id, config_version=task.config_version)
         except Exception as exc:
             self._close_log_handle(log_file_handle)
             print(f"启动任务 '{task_name}' 失败: {exc}")

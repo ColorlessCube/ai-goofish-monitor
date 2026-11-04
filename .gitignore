@@ -2,6 +2,9 @@
 *.iml
 xianyu_state.json
 .env
+# EnvManager transaction artifacts: never commit locks or crash leftovers.
+.env.lock
+.env-write-*
 .aider*
 images/
 logs/

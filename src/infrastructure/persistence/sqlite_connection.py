@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -134,15 +135,50 @@ def _prepare_database_file(path: str) -> None:
 
 
 def _apply_pragmas(conn: sqlite3.Connection) -> None:
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
     conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+    deadline = time.monotonic() + BUSY_TIMEOUT_MS / 1000
+    while True:
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            break
+        except sqlite3.OperationalError as exc:
+            # Concurrent first opens can reject the WAL transition immediately,
+            # bypassing SQLite's busy handler. Retry only this pre-transaction step.
+            code = getattr(exc, "sqlite_errorcode", 0) & 0xff
+            if code not in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED} or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
+    conn.execute("PRAGMA foreign_keys=ON")
 
 
 def init_schema(conn: sqlite3.Connection) -> None:
     for statement in SCHEMA_STATEMENTS:
         conn.execute(statement)
+    _migrate_task_identity(conn)
     _migrate_result_items_status(conn)
+    conn.commit()
+
+
+def _migrate_task_identity(conn: sqlite3.Connection) -> None:
+    # Serialize ALTER/backfill across processes; retain existing IDs, including 0.
+    conn.execute("BEGIN IMMEDIATE")
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
+    if "instance_id" not in cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN instance_id TEXT NOT NULL DEFAULT ''")
+    if "config_version" not in cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN config_version INTEGER NOT NULL DEFAULT 1")
+    conn.execute("UPDATE tasks SET instance_id = lower(hex(randomblob(16))) WHERE instance_id = ''")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_task_instance ON tasks(instance_id) WHERE instance_id != ''")
+    # Keep a high-water mark even after the last row is deleted.
+    conn.execute("INSERT OR IGNORE INTO app_metadata(key,value) VALUES ('tasks:next_id','0')")
+    conn.execute("UPDATE app_metadata SET value = MAX(CAST(value AS INTEGER), (SELECT COALESCE(MAX(id),-1)+1 FROM tasks)) WHERE key='tasks:next_id'")
+    conn.execute("""CREATE TRIGGER IF NOT EXISTS task_instance_on_import AFTER INSERT ON tasks
+        WHEN NEW.instance_id = '' BEGIN
+        UPDATE tasks SET instance_id = lower(hex(randomblob(16))) WHERE id=NEW.id;
+        END""")
+    conn.execute("""CREATE TRIGGER IF NOT EXISTS task_id_high_water AFTER INSERT ON tasks BEGIN
+        UPDATE app_metadata SET value=MAX(CAST(value AS INTEGER), NEW.id+1) WHERE key='tasks:next_id';
+        END""")
     conn.commit()
 
 

@@ -11,6 +11,7 @@ from src.config import STATE_FILE
 from src.infrastructure.persistence.sqlite_task_repository import SqliteTaskRepository
 from src.scraper import scrape_xianyu
 from src.services.account_strategy_service import uses_ass_account
+from src.services.prompt_assets import read_prompt
 
 
 async def main():
@@ -32,7 +33,14 @@ async def main():
     parser.add_argument("--debug-limit", type=int, default=0, help="调试模式：每个任务仅处理前 N 个新商品（0 表示无限制）")
     parser.add_argument("--config", type=str, help="指定任务配置文件路径（传入时优先读取 JSON）")
     parser.add_argument("--task-name", type=str, help="只运行指定名称的单个任务 (用于定时任务调度)")
+    parser.add_argument("--task-id", type=int)
+    parser.add_argument("--task-instance", type=str)
+    parser.add_argument("--expected-config-version", type=int)
     args = parser.parse_args()
+    if (args.task_id is None) != (args.task_instance is None):
+        parser.error("--task-id and --task-instance must be supplied together")
+    if args.expected_config_version is not None and (args.task_id is None or args.expected_config_version < 1):
+        parser.error("--expected-config-version requires an ID/instance and a positive version")
 
     if args.config:
         if not os.path.exists(args.config):
@@ -45,7 +53,24 @@ async def main():
     else:
         repository = SqliteTaskRepository()
         tasks = await repository.find_all()
-        tasks_config = [task.dict() for task in tasks]
+        tasks_config = [task.model_dump() for task in tasks]
+
+    # Select before loading any prompts/cookies. Reject ambiguous legacy names.
+    if args.task_id is not None:
+        tasks_config = [task for task in tasks_config if task.get("id") == args.task_id and task.get("instance_id") == args.task_instance]
+    elif args.task_name:
+        tasks_config = [task for task in tasks_config if task.get("task_name") == args.task_name]
+        if len(tasks_config) != 1:
+            print("Task name is missing or ambiguous; refusing to start")
+            return
+    if not tasks_config:
+        print("Task instance no longer exists; refusing to start")
+        return
+    if args.expected_config_version is not None and (
+        len(tasks_config) != 1 or tasks_config[0].get("config_version") != args.expected_config_version
+    ):
+        print("Task configuration changed; refusing to start")
+        return
 
     def normalize_keywords(value):
         if value is None:
@@ -116,10 +141,8 @@ async def main():
 
         if task.get("enabled", False) and task.get("ai_prompt_base_file") and task.get("ai_prompt_criteria_file"):
             try:
-                with open(task["ai_prompt_base_file"], 'r', encoding='utf-8') as f_base:
-                    base_prompt = f_base.read()
-                with open(task["ai_prompt_criteria_file"], 'r', encoding='utf-8') as f_criteria:
-                    criteria_text = f_criteria.read()
+                base_prompt = read_prompt(task["ai_prompt_base_file"])
+                criteria_text = read_prompt(task["ai_prompt_criteria_file"])
                 
                 # 动态组合成最终的Prompt
                 task['ai_prompt_text'] = base_prompt.replace("{{CRITERIA_SECTION}}", criteria_text)
@@ -140,8 +163,7 @@ async def main():
                 task['ai_prompt_text'] = ""
         elif task.get("enabled", False) and task.get("ai_prompt_file"):
             try:
-                with open(task["ai_prompt_file"], 'r', encoding='utf-8') as f:
-                    task['ai_prompt_text'] = f.read()
+                task['ai_prompt_text'] = read_prompt(task["ai_prompt_file"])
                 print(f"✅ 任务 '{task['task_name']}' 的prompt文件读取成功，长度: {len(task['ai_prompt_text'])} 字符")
             except FileNotFoundError:
                 print(f"警告: 任务 '{task['task_name']}' 的prompt文件 '{task['ai_prompt_file']}' 未找到，该任务的AI分析将被跳过。")
@@ -150,6 +172,8 @@ async def main():
                 print(f"错误: 任务 '{task['task_name']}' 读取prompt文件时发生异常: {e}，该任务的AI分析将被跳过。")
                 task['ai_prompt_text'] = ""
 
+    # AI mode without a valid controlled prompt must not crawl unscreened.
+    tasks_config = [task for task in tasks_config if task.get("decision_mode") == "keyword" or task.get("ai_prompt_text")]
     print("\n--- 开始执行监控任务 ---")
     if args.debug_limit > 0:
         print(f"** 调试模式已激活，每个任务最多处理 {args.debug_limit} 个新商品 **")

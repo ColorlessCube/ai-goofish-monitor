@@ -29,19 +29,22 @@ def test_notification_service_collects_success_and_failure_results():
     )
 
     assert results["ok"]["success"] is True
-    assert results["ok"]["message"] == "发送成功"
+    assert results["ok"]["outcome"] == "accepted" and results["ok"]["delivery_status"] == "unknown"
     assert results["fail"]["success"] is False
-    assert results["fail"]["message"] == "boom"
+    assert results["fail"]["outcome"] == "unknown" and results["fail"]["retry_allowed"] is False
+    assert "boom" not in results["fail"]["message"]
 
 
 def test_webhook_client_renders_json_templates(monkeypatch):
     captured = {}
 
     class _FakeResponse:
+        status_code = 200
         def raise_for_status(self):
             return None
 
-    def _fake_post(url, headers=None, json=None, data=None, timeout=None):
+    def _fake_post(url, headers=None, json=None, data=None, timeout=None, allow_redirects=True):
+        assert allow_redirects is False
         captured["url"] = url
         captured["headers"] = headers
         captured["json"] = json

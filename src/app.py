@@ -114,6 +114,8 @@ app.include_router(results.router)
 app.include_router(login_state.router)
 app.include_router(websocket.router)
 app.include_router(accounts.router)
+from src.mcp.remote import router as mcp_router
+app.include_router(mcp_router)
 
 # 挂载静态文件
 # 旧的静态文件目录（用于截图等）

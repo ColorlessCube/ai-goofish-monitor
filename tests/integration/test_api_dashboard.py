@@ -18,6 +18,8 @@ def _write_jsonl(path, records):
 
 def test_dashboard_summary_aggregates_tasks_and_results(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    (tmp_path / "prompts").mkdir()
+    (tmp_path / "prompts/base_prompt.txt").write_text("fixture base prompt")
 
     jsonl_dir = tmp_path / "jsonl"
     jsonl_dir.mkdir(parents=True, exist_ok=True)

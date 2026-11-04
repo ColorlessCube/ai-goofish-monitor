@@ -9,6 +9,50 @@ from typing import Dict
 from src.utils import convert_goofish_link
 
 
+class NotificationRejected(RuntimeError):
+    """The receiver explicitly rejected this attempt; no response text escapes."""
+
+
+class NotificationOutcomeUnknown(RuntimeError):
+    """No conclusive acceptance/rejection acknowledgement was received."""
+
+
+def validate_response(response, channel: str) -> None:
+    """Validate the receiver's acceptance boundary, never claim user delivery."""
+    status = getattr(response, "status_code", None)
+    if type(status) is not int:
+        raise NotificationOutcomeUnknown("acknowledgement_missing")
+    if 400 <= status < 500 and status != 408:
+        raise NotificationRejected("receiver_rejected")
+    if not 200 <= status < 300:
+        raise NotificationOutcomeUnknown("acceptance_unknown")
+    if channel == "webhook":
+        # Generic webhook schemas are unknown: only HTTP acceptance is evidence.
+        return
+    try:
+        body = response.json()
+    except Exception:
+        raise NotificationOutcomeUnknown("acknowledgement_invalid") from None
+    if not isinstance(body, dict):
+        raise NotificationOutcomeUnknown("acknowledgement_invalid")
+    fields = {"bark": ("code", 200, int), "wecom": ("errcode", 0, int),
+              "telegram": ("ok", True, bool)}
+    if channel in fields:
+        key, accepted, expected_type = fields[channel]
+        if type(body.get(key)) is not expected_type:
+            raise NotificationOutcomeUnknown("acknowledgement_missing")
+        if body[key] != accepted:
+            raise NotificationRejected("receiver_rejected")
+    elif channel == "gotify":
+        if type(body.get("id")) is not int or body["id"] <= 0:
+            raise NotificationOutcomeUnknown("acknowledgement_missing")
+    elif channel == "ntfy":
+        if not isinstance(body.get("id"), str) or not body["id"] or body.get("event") != "message":
+            raise NotificationOutcomeUnknown("acknowledgement_missing")
+    else:
+        raise NotificationOutcomeUnknown("acknowledgement_unsupported")
+
+
 @dataclass(frozen=True)
 class NotificationMessage:
     title: str

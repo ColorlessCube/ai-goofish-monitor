@@ -8,7 +8,7 @@ import requests
 
 from src.infrastructure.config.settings import DEFAULT_TELEGRAM_API_BASE_URL
 
-from .base import NotificationClient
+from .base import validate_response, NotificationClient
 
 
 class TelegramClient(NotificationClient):
@@ -65,10 +65,8 @@ class TelegramClient(NotificationClient):
                 telegram_api_url,
                 json=telegram_payload,
                 headers=headers,
-                timeout=10
+                timeout=10,
+                allow_redirects=False,
             )
         )
-        response.raise_for_status()
-        result = response.json()
-        if not result.get("ok"):
-            raise RuntimeError(result.get("description", "Telegram 返回未知错误"))
+        validate_response(response, self.channel_key)

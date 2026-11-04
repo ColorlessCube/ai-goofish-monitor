@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 from src.domain.models.task import Task
 
 
-TaskGenerationStatus = Literal["queued", "running", "completed", "failed"]
+TaskGenerationStatus = Literal["queued", "running", "completed", "failed", "partial_success", "unknown"]
 TaskGenerationStepStatus = Literal["pending", "running", "completed", "failed"]
 
 
@@ -32,3 +32,5 @@ class TaskGenerationJob(BaseModel):
     steps: List[TaskGenerationStep] = Field(default_factory=list)
     task: Optional[Task] = None
     error: Optional[str] = None
+    task_committed: Optional[bool] = None
+    retry_safe: bool = False

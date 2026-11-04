@@ -28,6 +28,8 @@ class TaskGenerationService:
         self._jobs: Dict[str, TaskGenerationJob] = {}
         self._lock = threading.Lock()
         self._workers: set[threading.Thread] = set()
+        self._job_workers: dict[str, threading.Thread] = {}
+        self._active_jobs: dict[str, asyncio.Task] = {}
 
     async def create_job(self, task_name: str) -> TaskGenerationJob:
         job = TaskGenerationJob(
@@ -49,7 +51,20 @@ class TaskGenerationService:
                 return None
             return deepcopy(job)
 
-    def track(self, coroutine: Awaitable[None]) -> None:
+    def begin_work(self, job_id: str) -> None:
+        with self._lock:
+            self._active_jobs[job_id] = asyncio.current_task()
+
+    def end_work(self, job_id: str) -> None:
+        with self._lock:
+            self._active_jobs.pop(job_id, None)
+
+    def is_active(self, job_id: str) -> bool:
+        with self._lock:
+            work = self._active_jobs.get(job_id)
+            return job_id in self._job_workers or (work is not None and not work.done())
+
+    def track(self, coroutine: Awaitable[None], *, job_id: str) -> None:
         thread: Optional[threading.Thread] = None
 
         def runner() -> None:
@@ -60,11 +75,20 @@ class TaskGenerationService:
                     return
                 with self._lock:
                     self._workers.discard(thread)
+                    self._job_workers.pop(job_id, None)
 
         thread = threading.Thread(target=runner, daemon=True)
         with self._lock:
             self._workers.add(thread)
-        thread.start()
+            self._job_workers[job_id] = thread
+        try:
+            thread.start()
+        except BaseException:
+            with self._lock:
+                self._workers.discard(thread)
+                self._job_workers.pop(job_id, None)
+            coroutine.close()
+            raise
 
     async def advance(self, job_id: str, step_key: str, message: str) -> TaskGenerationJob:
         with self._lock:
@@ -98,6 +122,24 @@ class TaskGenerationService:
                 if step.status != "failed":
                     step.status = "completed"
             return deepcopy(job)
+
+    async def partial(self, job_id: str, task: Task, error: str) -> TaskGenerationJob:
+        with self._lock:
+            job = self._require_job(job_id)
+            job.task = deepcopy(task)
+            job.status = "partial_success"
+            job.current_step = "scheduler"
+            job.error = error
+            job.message = "Task persisted; scheduler repair required"
+            return deepcopy(job)
+
+    async def publish(self, job_id: str, data: dict) -> TaskGenerationJob:
+        """Publish only the reconciled durable outcome, never the live task row."""
+        with self._lock:
+            job = self._jobs.get(job_id) or TaskGenerationJob(job_id=job_id, task_name=data.get("task_name", ""))
+            merged = job.model_dump(mode="json") | data
+            self._jobs[job_id] = TaskGenerationJob.model_validate(merged)
+            return deepcopy(self._jobs[job_id])
 
     async def fail(
         self,

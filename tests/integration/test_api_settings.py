@@ -250,7 +250,8 @@ def test_notification_test_endpoint_merges_stored_secret_values(tmp_path, monkey
         def json(self):
             return {"ok": True}
 
-    def _fake_post(url, json=None, headers=None, timeout=None):
+    def _fake_post(url, json=None, headers=None, timeout=None, allow_redirects=True):
+        assert allow_redirects is False
         captured["url"] = url
         captured["json"] = json
         return _FakeResponse()
@@ -287,6 +288,9 @@ def test_notification_test_endpoint_ignores_other_channel_dirty_fields(tmp_path,
     captured = []
 
     class _FakeResponse:
+        def json(self):
+            return {"id": "fixture-id", "event": "message"}
+
         status_code = 200
 
         def raise_for_status(self):
@@ -414,7 +418,10 @@ def test_ai_test_endpoint_falls_back_to_responses_when_chat_completions_api_404(
 
         def _chat_create(self, **kwargs):
             request_history.append(("chat", kwargs))
-            raise Exception("Error code: 404 - page not found")
+            import httpx
+            from openai import NotFoundError
+            raise NotFoundError("page not found", response=httpx.Response(404,
+                request=httpx.Request("POST", "https://fixture.invalid")), body=None)
 
     import openai
 

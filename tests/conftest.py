@@ -66,7 +66,7 @@ class FakeProcessService:
         self._on_started = on_started
         self._on_stopped = on_stopped
 
-    async def start_task(self, task_id: int, task_name: str) -> bool:
+    async def start_task(self, task_id: int, task_name: str, **preconditions) -> bool:
         self.started.append((task_id, task_name))
         if self._on_started:
             await self._on_started(task_id)
@@ -100,7 +100,12 @@ class FakeSchedulerService:
 
 
 @pytest.fixture()
-def api_context(tmp_path):
+def api_context(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    prompts = tmp_path / "prompts"
+    prompts.mkdir(exist_ok=True)
+    for name in ("base_prompt.txt", "sony_a7m4_criteria.txt", "sony_a7cr_criteria.txt"):
+        (prompts / name).write_text("fixture screening criteria {{CRITERIA_SECTION}}", encoding="utf-8")
     config_file = tmp_path / "config.json"
     config_file.write_text("[]", encoding="utf-8")
     db_path = tmp_path / "app.sqlite3"

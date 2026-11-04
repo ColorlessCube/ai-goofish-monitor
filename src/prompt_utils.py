@@ -45,14 +45,9 @@ async def _report_progress(
         await progress_callback(step_key, message)
 
 
-def _read_reference_text(reference_file_path: str) -> str:
-    try:
-        with open(reference_file_path, "r", encoding="utf-8") as file:
-            return file.read()
-    except FileNotFoundError:
-        raise FileNotFoundError(f"参考文件未找到: {reference_file_path}")
-    except IOError as exc:
-        raise IOError(f"读取参考文件失败: {exc}")
+def _read_reference_text(reference_file_path: str, prompts_dir=None) -> str:
+    from src.services.prompt_assets import read_prompt
+    return read_prompt(reference_file_path, prompts_dir)
 
 
 async def _request_generated_text(ai_client: AIClient, prompt: str) -> str:
@@ -88,6 +83,7 @@ async def generate_criteria(
     user_description: str,
     reference_file_path: str,
     progress_callback: Optional[ProgressCallback] = None,
+    *, prompts_dir=None,
 ) -> str:
     """
     Generates a new criteria file content using AI.
@@ -102,7 +98,7 @@ async def generate_criteria(
 
         await _report_progress(progress_callback, "reference", "正在读取参考文件。")
         print(f"正在读取参考文件: {reference_file_path}")
-        reference_text = _read_reference_text(reference_file_path)
+        reference_text = _read_reference_text(reference_file_path, prompts_dir)
 
         await _report_progress(progress_callback, "prompt", "正在构建发送给 AI 的指令。")
         print("正在构建发送给AI的指令...")

@@ -105,6 +105,10 @@ class ApiAuthorizationMiddleware(BaseHTTPMiddleware):
         path = request.url.path
         if not path.startswith("/api/"):
             return await call_next(request)
+        if path == "/api/mcp":
+            # Exact native endpoint owns its Bearer/scope/Origin checks.
+            # Browser cookies and the REST read token never grant MCP writes.
+            return await call_next(request)
 
         try:
             session_subject = verify_admin_session(request.cookies.get(SESSION_COOKIE))

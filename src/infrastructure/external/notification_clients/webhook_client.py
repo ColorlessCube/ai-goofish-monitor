@@ -8,7 +8,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import requests
 
-from .base import NotificationClient, NotificationMessage
+from .base import validate_response, NotificationClient, NotificationMessage
 
 
 class WebhookClient(NotificationClient):
@@ -47,9 +47,9 @@ class WebhookClient(NotificationClient):
         if self.webhook_method == "GET":
             response = await loop.run_in_executor(
                 None,
-                lambda: requests.get(final_url, headers=headers, timeout=15),
+                lambda: requests.get(final_url, headers=headers, timeout=15, allow_redirects=False),
             )
-            response.raise_for_status()
+            validate_response(response, self.channel_key)
             return
 
         json_payload, form_payload = self._build_body(message, headers)
@@ -61,9 +61,10 @@ class WebhookClient(NotificationClient):
                 json=json_payload,
                 data=form_payload,
                 timeout=15,
+                allow_redirects=False,
             ),
         )
-        response.raise_for_status()
+        validate_response(response, self.channel_key)
 
     def _build_url(self, message: NotificationMessage) -> str:
         params = self._parse_json(

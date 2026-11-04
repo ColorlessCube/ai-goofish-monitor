@@ -126,23 +126,24 @@ async def get_notification_settings():
 
 @router.put("/notifications")
 async def update_notification_settings(settings: NotificationSettingsModel):
-    try:
-        updates, deletions, merged_settings = prepare_notification_settings_update(
-            model_dump(settings, exclude_unset=True),
-            load_notification_settings(),
-        )
-    except NotificationSettingsValidationError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    with env_manager.transaction():
+        try:
+            updates, deletions, merged_settings = prepare_notification_settings_update(
+                model_dump(settings, exclude_unset=True),
+                load_notification_settings(),
+            )
+        except NotificationSettingsValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    success = env_manager.apply_changes(updates=updates, deletions=deletions)
-    if not success:
-        raise HTTPException(status_code=500, detail="更新通知设置失败")
+        success = env_manager.apply_changes(updates=updates, deletions=deletions)
+        if not success:
+            raise HTTPException(status_code=500, detail="更新通知设置失败")
 
-    _reload_env()
-    return {
-        "message": "通知设置已成功更新",
-        "configured_channels": build_configured_channels(merged_settings),
-    }
+        _reload_env()
+        return {
+            "message": "通知设置已成功更新",
+            "configured_channels": build_configured_channels(merged_settings),
+        }
 
 
 @router.post("/notifications/test")
@@ -286,23 +287,34 @@ async def update_ai_settings(settings: AISettingsModel):
 @router.post("/ai/test")
 async def test_ai_settings(settings: dict):
     """测试AI模型设置是否有效"""
+    from openai import APIStatusError
+    attempted = False
+    client = None
+    http_client = None
     try:
-        from openai import OpenAI
-        import httpx
+        from openai import DefaultHttpxClient, OpenAI
 
-        stored_api_key = env_manager.get_value("OPENAI_API_KEY", "")
-        submitted_api_key = settings.get("OPENAI_API_KEY", "")
-        api_key = submitted_api_key or stored_api_key
+        # An explicit empty saved credential must not borrow another version.
+        if "OPENAI_API_KEY" in settings:
+            api_key = settings["OPENAI_API_KEY"]
+        else:
+            api_key = env_manager.snapshot().get_value("OPENAI_API_KEY", "")
 
+        # Use the SDK's compatible client in both branches. Its default follows
+        # redirects, which would resend a billable request to an unsaved target.
+        proxy_url = settings.get("PROXY_URL", "")
+        http_client = DefaultHttpxClient(
+            proxy=proxy_url or None,
+            follow_redirects=False,
+            timeout=30.0,
+        )
         client_params = {
             "api_key": api_key,
             "base_url": settings.get("OPENAI_BASE_URL", ""),
-            "timeout": httpx.Timeout(30.0),
+            "timeout": 30.0,
+            "max_retries": 0,
+            "http_client": http_client,
         }
-
-        proxy_url = settings.get("PROXY_URL", "")
-        if proxy_url:
-            client_params["http_client"] = httpx.Client(proxy=proxy_url)
 
         model_name = settings.get("OPENAI_MODEL_NAME", "")
         client = OpenAI(**client_params)
@@ -310,6 +322,7 @@ async def test_ai_settings(settings: dict):
         api_mode = CHAT_COMPLETIONS_API_MODE
 
         try:
+            attempted = True
             response = create_ai_response_sync(
                 client,
                 api_mode,
@@ -321,7 +334,8 @@ async def test_ai_settings(settings: dict):
                 ),
             )
         except Exception as exc:
-            if not is_chat_completions_api_unsupported_error(exc):
+            if not (isinstance(exc, APIStatusError) and exc.status_code in {400, 404, 405, 422}
+                    and is_chat_completions_api_unsupported_error(exc)):
                 raise
             api_mode = RESPONSES_API_MODE
             response = create_ai_response_sync(
@@ -337,11 +351,26 @@ async def test_ai_settings(settings: dict):
 
         return {
             "success": True,
+            "attempted": True,
+            "outcome": "accepted",
+            "retry_allowed": False,
             "message": "AI模型连接测试成功！",
             "response": extract_ai_response_content(response),
         }
     except Exception as exc:
+        rejected = isinstance(exc, APIStatusError) and 400 <= exc.status_code < 500 and exc.status_code != 408
         return {
             "success": False,
-            "message": f"AI模型连接测试失败: {exc}",
+            "attempted": attempted,
+            "outcome": "rejected" if rejected else ("unknown" if attempted else "not_attempted"),
+            "retry_allowed": False,
+            "message": "AI测试未获确认，请勿自动重试" if attempted else "AI测试配置无效",
         }
+    finally:
+        # Cleanup failures cannot turn an accepted request into a failed receipt.
+        for resource in (client, http_client):
+            try:
+                if resource is not None and hasattr(resource, "close"):
+                    resource.close()
+            except Exception:
+                pass

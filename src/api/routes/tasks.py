@@ -4,8 +4,9 @@
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from typing import List
-import os
-import aiofiles
+import asyncio
+from src.services import prompt_assets as assets
+from src.services.generation_receipts import GenerationReceipts, settle
 from src.api.dependencies import (
     get_process_service,
     get_scheduler_service,
@@ -18,16 +19,13 @@ from src.services.scheduler_service import SchedulerService
 from src.services.task_generation_service import TaskGenerationService
 from src.services.task_generation_runner import (
     build_task_create,
+    build_criteria_filename,
     run_ai_generation_job,
 )
 from src.services.task_payloads import serialize_task, serialize_tasks
 from src.domain.models.task import TaskCreate, TaskUpdate, TaskGenerateRequest
 from src.prompt_utils import generate_criteria
-from src.utils import resolve_task_log_path
 from src.services.account_strategy_service import normalize_account_strategy
-from src.infrastructure.persistence.storage_names import build_result_filename
-from src.services.price_history_service import delete_price_snapshots
-from src.services.result_storage_service import delete_result_file_records
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
 async def _reload_scheduler_if_needed(
@@ -103,6 +101,7 @@ async def generate_task(
         mode = req.decision_mode or "ai"
         if mode == "ai":
             job = await generation_service.create_job(req.task_name)
+            await GenerationReceipts(service.repository).create(job)
             generation_service.track(
                 run_ai_generation_job(
                     job_id=job.job_id,
@@ -110,19 +109,53 @@ async def generate_task(
                     task_service=service,
                     scheduler_service=scheduler_service,
                     generation_service=generation_service,
-                )
+                ), job_id=job.job_id
             )
             return JSONResponse(
                 status_code=202,
                 content={
                     "message": "AI 任务生成已开始。",
-                    "job": job.model_dump(mode="json"),
+                    "job": job.model_dump(mode="json", exclude={"task_committed"}),
                 },
             )
 
-        task = await service.create_task(build_task_create(req, ""))
-        await _reload_scheduler_if_needed(service, scheduler_service)
-        return {"message": "任务创建成功。", "task": serialize_task(task, scheduler_service)}
+        job = await generation_service.create_job(req.task_name)
+        receipts = GenerationReceipts(service.repository)
+        generation_service.begin_work(job.job_id)
+        try:
+            await settle(receipts.create(job))
+
+            def record_created(conn, created):
+                receipts.change_in_transaction(conn, job.job_id, {
+                    "task": created.model_dump(mode="json"), "task_committed": True,
+                    "status": "running", "current_step": "scheduler",
+                })
+
+            task = await settle(service.create_task(
+                build_task_create(req, ""), on_saved=record_created,
+            ))
+            await _reload_scheduler_if_needed(service, scheduler_service)
+            outcome = await receipts.change(
+                job.job_id, status="completed", current_step=None, error=None, retry_safe=False,
+            )
+            await generation_service.publish(job.job_id, outcome)
+            return {"message": "任务创建成功。", "task": serialize_task(task, scheduler_service)}
+        except BaseException as exc:
+            # COMMIT can succeed before save returns (e.g. asset unlock fails).
+            # Only the same-transaction receipt proves the created task exists.
+            outcome = await settle(receipts.recover(
+                job.job_id, generation_service, uncertain=not isinstance(exc, Exception),
+            ))
+            if not isinstance(exc, Exception):
+                raise
+            if outcome["status"] == "failed":
+                status_code = exc.status_code if isinstance(exc, HTTPException) else 500
+                if isinstance(exc, HTTPException):
+                    outcome = outcome | {"detail": exc.detail}
+                return JSONResponse(status_code=status_code, content=outcome)
+            return outcome
+        finally:
+            generation_service.end_work(job.job_id)
 
     except HTTPException:
         raise
@@ -136,12 +169,10 @@ async def generate_task(
 async def get_task_generation_job(
     job_id: str,
     generation_service: TaskGenerationService = Depends(get_task_generation_service),
+    service: TaskService = Depends(get_task_service),
 ):
     """获取任务生成作业状态"""
-    job = await generation_service.get_job(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="任务生成作业未找到")
-    return {"job": job.model_dump(mode="json")}
+    return {"job": await GenerationReceipts(service.repository).observe(job_id, generation_service)}
 @router.patch("/{task_id}", response_model=dict)
 async def update_task(
     task_id: int,
@@ -182,24 +213,20 @@ async def update_task(
                 )
                 if not str(description_for_ai or "").strip():
                     raise HTTPException(status_code=400, detail="AI 模式下详细需求不能为空。")
-                safe_keyword = "".join(
-                    c for c in existing_task.keyword.lower().replace(' ', '_')
-                    if c.isalnum() or c in "_-"
-                ).rstrip()
-                output_filename = f"prompts/{safe_keyword}_criteria.txt"
+                output_filename = build_criteria_filename(existing_task.keyword)
                 print(f"目标文件路径: {output_filename}")
                 print("开始调用 AI 生成新的分析标准...")
                 generated_criteria = await generate_criteria(
                     user_description=description_for_ai,
-                    reference_file_path="prompts/macbook_criteria.txt"
+                    reference_file_path="prompts/macbook_criteria.txt",
+                    prompts_dir=service.repository.prompts_dir,
                 )
                 if not generated_criteria or len(generated_criteria.strip()) == 0:
                     print("AI 返回的内容为空")
                     raise HTTPException(status_code=500, detail="AI 未能生成分析标准，返回内容为空。")
                 print(f"保存新的分析标准到: {output_filename}")
-                os.makedirs("prompts", exist_ok=True)
-                async with aiofiles.open(output_filename, 'w', encoding='utf-8') as f:
-                    await f.write(generated_criteria)
+                await asyncio.to_thread(assets.write_prompt, output_filename, generated_criteria,
+                    service.repository.prompts_dir, create=True)
                 print(f"新的分析标准已保存")
                 task_update.ai_prompt_criteria_file = output_filename
                 print(f"已更新 ai_prompt_criteria_file 字段为: {output_filename}")
@@ -211,7 +238,7 @@ async def update_task(
                 import traceback
                 print(traceback.format_exc())
                 raise HTTPException(status_code=500, detail=error_msg)
-        task = await service.update_task(task_id, task_update)
+        task = await service.update_task(task_id, task_update, expected=existing_task)
         await _reload_scheduler_if_needed(service, scheduler_service)
         return {"message": "任务更新成功", "task": serialize_task(task, scheduler_service)}
     except ValueError as e:
@@ -219,40 +246,23 @@ async def update_task(
 @router.delete("/{task_id}", response_model=dict)
 async def delete_task(
     task_id: int,
+    purge: bool = False,
     service: TaskService = Depends(get_task_service),
     process_service: ProcessService = Depends(get_process_service),
     scheduler_service: SchedulerService = Depends(get_scheduler_service),
 ):
-    """删除任务"""
+    """Configuration-only deletion. Historical artifacts are never purged here."""
+    if purge:
+        raise HTTPException(status_code=409, detail="purge_not_supported")
     task = await service.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="任务未找到")
 
     await process_service.stop_task(task_id)
-    success = await service.delete_task(task_id)
+    success = await service.delete_task(task_id, expected=task)
     if not success:
         raise HTTPException(status_code=404, detail="任务未找到")
     await _reload_scheduler_if_needed(service, scheduler_service)
-    try:
-        keyword = (task.keyword or "").strip()
-        if keyword:
-            remaining_tasks = await service.get_all_tasks()
-            keyword_still_in_use = any(
-                (remaining_task.keyword or "").strip() == keyword
-                for remaining_task in remaining_tasks
-            )
-            if not keyword_still_in_use:
-                await delete_result_file_records(build_result_filename(keyword))
-                delete_price_snapshots(keyword)
-    except Exception as e:
-        print(f"删除任务结果文件时出错: {e}")
-
-    try:
-        log_file_path = resolve_task_log_path(task_id, task.task_name)
-        if os.path.exists(log_file_path):
-            os.remove(log_file_path)
-    except Exception as e:
-        print(f"删除任务日志文件时出错: {e}")
     return {"message": "任务删除成功"}
 @router.post("/start/{task_id}", response_model=dict)
 async def start_task(

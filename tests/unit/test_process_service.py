@@ -27,6 +27,13 @@ class FakeProcess:
 
 
 def test_process_service_marks_task_stopped_when_process_exits(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("APP_DATABASE_FILE", str(tmp_path / "app.sqlite3"))
+    from src.infrastructure.persistence.sqlite_task_repository import SqliteTaskRepository
+    from src.services.task_service import TaskService
+    from src.domain.models.task import TaskCreate
+    asyncio.run(TaskService(SqliteTaskRepository(legacy_config_file=None)).create_task(
+        TaskCreate(task_name="task-a", keyword="camera", decision_mode="keyword", keyword_rules=["ok"])))
     fake_process = FakeProcess(pid=4321)
     events = []
 

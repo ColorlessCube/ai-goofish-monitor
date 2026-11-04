@@ -250,26 +250,27 @@ def _build_channel_test_values(
 
 
 def load_notification_settings() -> NotificationSettings:
+    snapshot = env_manager.snapshot()
     return _build_notification_settings_model(
         {
-            "ntfy_topic_url": _normalize_existing_text(env_manager.get_value("NTFY_TOPIC_URL")),
-            "gotify_url": _normalize_existing_text(env_manager.get_value("GOTIFY_URL")),
-            "gotify_token": _normalize_existing_text(env_manager.get_value("GOTIFY_TOKEN")),
-            "bark_url": _normalize_existing_text(env_manager.get_value("BARK_URL")),
-            "wx_bot_url": _normalize_existing_text(env_manager.get_value("WX_BOT_URL")),
-            "telegram_bot_token": _normalize_existing_text(env_manager.get_value("TELEGRAM_BOT_TOKEN")),
-            "telegram_chat_id": _normalize_existing_text(env_manager.get_value("TELEGRAM_CHAT_ID")),
+            "ntfy_topic_url": _normalize_existing_text(snapshot.get_value("NTFY_TOPIC_URL")),
+            "gotify_url": _normalize_existing_text(snapshot.get_value("GOTIFY_URL")),
+            "gotify_token": _normalize_existing_text(snapshot.get_value("GOTIFY_TOKEN")),
+            "bark_url": _normalize_existing_text(snapshot.get_value("BARK_URL")),
+            "wx_bot_url": _normalize_existing_text(snapshot.get_value("WX_BOT_URL")),
+            "telegram_bot_token": _normalize_existing_text(snapshot.get_value("TELEGRAM_BOT_TOKEN")),
+            "telegram_chat_id": _normalize_existing_text(snapshot.get_value("TELEGRAM_CHAT_ID")),
             "telegram_api_base_url": (
-                _normalize_existing_text(env_manager.get_value("TELEGRAM_API_BASE_URL"))
+                _normalize_existing_text(snapshot.get_value("TELEGRAM_API_BASE_URL"))
                 or DEFAULT_TELEGRAM_API_BASE_URL
             ),
-            "webhook_url": _normalize_existing_text(env_manager.get_value("WEBHOOK_URL")),
-            "webhook_method": _normalize_existing_text(env_manager.get_value("WEBHOOK_METHOD")) or "POST",
-            "webhook_headers": _normalize_existing_text(env_manager.get_value("WEBHOOK_HEADERS")),
-            "webhook_content_type": _normalize_existing_text(env_manager.get_value("WEBHOOK_CONTENT_TYPE")) or "JSON",
-            "webhook_query_parameters": _normalize_existing_text(env_manager.get_value("WEBHOOK_QUERY_PARAMETERS")),
-            "webhook_body": _normalize_existing_text(env_manager.get_value("WEBHOOK_BODY")),
-            "pcurl_to_mobile": _env_bool(env_manager.get_value("PCURL_TO_MOBILE"), True),
+            "webhook_url": _normalize_existing_text(snapshot.get_value("WEBHOOK_URL")),
+            "webhook_method": _normalize_existing_text(snapshot.get_value("WEBHOOK_METHOD")) or "POST",
+            "webhook_headers": _normalize_existing_text(snapshot.get_value("WEBHOOK_HEADERS")),
+            "webhook_content_type": _normalize_existing_text(snapshot.get_value("WEBHOOK_CONTENT_TYPE")) or "JSON",
+            "webhook_query_parameters": _normalize_existing_text(snapshot.get_value("WEBHOOK_QUERY_PARAMETERS")),
+            "webhook_body": _normalize_existing_text(snapshot.get_value("WEBHOOK_BODY")),
+            "pcurl_to_mobile": _env_bool(snapshot.get_value("PCURL_TO_MOBILE"), True),
         }
     )
 

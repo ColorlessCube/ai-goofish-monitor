@@ -6,7 +6,7 @@ from typing import Dict
 
 import requests
 
-from .base import NotificationClient
+from .base import validate_response, NotificationClient
 
 
 class GotifyClient(NotificationClient):
@@ -42,6 +42,6 @@ class GotifyClient(NotificationClient):
         loop = asyncio.get_running_loop()
         response = await loop.run_in_executor(
             None,
-            lambda: requests.post(final_url, files=payload, timeout=10),
+            lambda: requests.post(final_url, files=payload, timeout=10, allow_redirects=False),
         )
-        response.raise_for_status()
+        validate_response(response, self.channel_key)

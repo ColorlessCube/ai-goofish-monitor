@@ -4,7 +4,7 @@ Ntfy 通知客户端
 import asyncio
 import requests
 from typing import Dict
-from .base import NotificationClient
+from .base import validate_response, NotificationClient
 
 
 class NtfyClient(NotificationClient):
@@ -34,7 +34,8 @@ class NtfyClient(NotificationClient):
                     "Priority": "urgent",
                     "Tags": "bell,vibration"
                 },
-                timeout=10
+                timeout=10,
+                allow_redirects=False,
             )
         )
-        response.raise_for_status()
+        validate_response(response, self.channel_key)

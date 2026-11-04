@@ -6,9 +6,21 @@ import src.prompt_utils as prompt_utils
 from src.services.ai_response_parser import EmptyAIResponseError
 
 
+def test_generation_reference_consumption_rejects_symlink(monkeypatch, tmp_path):
+    from fastapi import HTTPException
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "prompts").mkdir()
+    (tmp_path / "secret.txt").write_text("private data")
+    (tmp_path / "prompts/reference.txt").symlink_to(tmp_path / "secret.txt")
+    with pytest.raises(HTTPException, match="unsafe_prompt_path"):
+        prompt_utils._read_reference_text("prompts/reference.txt")
+
+
 def test_generate_criteria_closes_ai_client_after_success(monkeypatch, tmp_path):
     close_state = {"closed": False}
-    reference_file = tmp_path / "reference.txt"
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "prompts").mkdir()
+    reference_file = tmp_path / "prompts/reference.txt"
     reference_file.write_text("reference", encoding="utf-8")
 
     class FakeAIClient:
@@ -27,7 +39,7 @@ def test_generate_criteria_closes_ai_client_after_success(monkeypatch, tmp_path)
     monkeypatch.setattr(prompt_utils, "AIClient", FakeAIClient)
 
     result = asyncio.run(
-        prompt_utils.generate_criteria("need a gpu", str(reference_file))
+        prompt_utils.generate_criteria("need a gpu", "prompts/reference.txt")
     )
 
     assert result == "generated criteria"
@@ -36,7 +48,9 @@ def test_generate_criteria_closes_ai_client_after_success(monkeypatch, tmp_path)
 
 def test_generate_criteria_closes_ai_client_after_ai_failure(monkeypatch, tmp_path):
     close_state = {"closed": False}
-    reference_file = tmp_path / "reference.txt"
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "prompts").mkdir()
+    reference_file = tmp_path / "prompts/reference.txt"
     reference_file.write_text("reference", encoding="utf-8")
 
     class FakeAIClient:
@@ -55,6 +69,6 @@ def test_generate_criteria_closes_ai_client_after_ai_failure(monkeypatch, tmp_pa
     monkeypatch.setattr(prompt_utils, "AIClient", FakeAIClient)
 
     with pytest.raises(EmptyAIResponseError, match="AI响应内容为空"):
-        asyncio.run(prompt_utils.generate_criteria("need a gpu", str(reference_file)))
+        asyncio.run(prompt_utils.generate_criteria("need a gpu", "prompts/reference.txt"))
 
     assert close_state["closed"] is True

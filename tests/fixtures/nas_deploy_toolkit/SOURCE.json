@@ -1,0 +1,7 @@
+{
+  "repository": "ColorlessCube/nas-deploy-toolkit",
+  "revision": "13ae397ae0e116eeac0bf388c40f4b12a7f82855",
+  "source_path": "infra/deploy/publish.py",
+  "sha256": "8797dc8e806853bfc3b0df039bdeef49deb9110a2f02f9dfa08b4061b81a2b9e",
+  "purpose": "Exact reviewed publisher test fixture. Network and Docker boundaries are replaced by fixtures; production uses pinned Actions checkout."
+}

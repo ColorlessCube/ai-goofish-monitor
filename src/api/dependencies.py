@@ -2,7 +2,7 @@
 FastAPI 依赖注入
 提供服务实例的创建和管理
 """
-from fastapi import Depends
+from fastapi import Depends, Request
 from src.services.task_service import TaskService
 from src.services.notification_service import NotificationService, build_notification_service
 from src.services.ai_service import AIAnalysisService
@@ -38,9 +38,10 @@ def set_task_generation_service(service: TaskGenerationService):
 
 
 # 服务依赖注入
-def get_task_service() -> TaskService:
-    """获取任务管理服务实例"""
-    repository = SqliteTaskRepository()
+def get_task_service(request: Request = None) -> TaskService:
+    """HTTP/MCP use the same configured prompt root and SQLite store."""
+    prompts_dir = getattr(request.app.state, "mcp_prompts_dir", None) if request else None
+    repository = SqliteTaskRepository(prompts_dir=prompts_dir)
     return TaskService(repository)
 
 

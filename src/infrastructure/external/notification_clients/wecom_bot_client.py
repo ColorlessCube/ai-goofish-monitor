@@ -6,7 +6,7 @@ from typing import Dict
 
 import requests
 
-from .base import NotificationClient
+from .base import validate_response, NotificationClient
 
 
 class WeComBotClient(NotificationClient):
@@ -43,9 +43,7 @@ class WeComBotClient(NotificationClient):
                 json=payload,
                 headers=headers,
                 timeout=10,
+                allow_redirects=False,
             ),
         )
-        response.raise_for_status()
-        result = response.json()
-        if result.get("errcode", 0) != 0:
-            raise RuntimeError(result.get("errmsg", "企业微信返回未知错误"))
+        validate_response(response, self.channel_key)

@@ -21,16 +21,18 @@ def test_cli_runs_single_task_with_prompt(tmp_path, load_json_fixture, monkeypat
     base_prompt = "Base prompt. " + ("x" * 120) + " {{CRITERIA_SECTION}}"
     criteria_prompt = "Criteria text for A7M4."
 
-    base_path = tmp_path / "base_prompt.txt"
-    criteria_path = tmp_path / "criteria_prompt.txt"
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "prompts").mkdir()
+    base_path = tmp_path / "prompts/base_prompt.txt"
+    criteria_path = tmp_path / "prompts/criteria_prompt.txt"
     base_path.write_text(base_prompt, encoding="utf-8")
     criteria_path.write_text(criteria_prompt, encoding="utf-8")
 
-    config_data[0]["ai_prompt_base_file"] = str(base_path)
-    config_data[0]["ai_prompt_criteria_file"] = str(criteria_path)
+    config_data[0]["ai_prompt_base_file"] = "prompts/base_prompt.txt"
+    config_data[0]["ai_prompt_criteria_file"] = "prompts/criteria_prompt.txt"
 
-    config_data[1]["ai_prompt_base_file"] = str(base_path)
-    config_data[1]["ai_prompt_criteria_file"] = str(criteria_path)
+    config_data[1]["ai_prompt_base_file"] = "prompts/base_prompt.txt"
+    config_data[1]["ai_prompt_criteria_file"] = "prompts/criteria_prompt.txt"
 
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps(config_data, ensure_ascii=False), encoding="utf-8")

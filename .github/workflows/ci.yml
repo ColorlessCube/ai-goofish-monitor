@@ -4,23 +4,19 @@ on:
   push:
     branches: ["**"]
   pull_request:
-  workflow_call:
-    inputs:
-      export_image:
-        description: Export the tested image for the delivery workflow
-        type: boolean
-        default: false
 
 permissions:
   contents: read
 
 concurrency:
   group: ai-goofish-ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Never cancel an in-flight immutable publication on master.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 jobs:
   backend:
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -29,11 +25,14 @@ jobs:
         with:
           version: "0.7.14"
           enable-cache: true
-      - name: Run hermetic Python tests
-        run: uv run --no-project --python 3.11 --with-requirements requirements.txt pytest -m 'not live' -q
+      - name: Run real hermetic Python tests and CI contract
+        run: |
+          uv run --no-project --python 3.11 --with-requirements requirements.txt --with PyYAML==6.0.3 pytest -m 'not live' -q
+          uv run --no-project --python 3.11 --with PyYAML==6.0.3 python scripts/check_ci_contract.py
 
   frontend:
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: web-ui
@@ -52,40 +51,110 @@ jobs:
   image:
     needs: [backend, frontend]
     runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      manifest_json: ${{ steps.publish-manifest.outputs.manifest_json }}
+      manifest_sha256: ${{ steps.publish-manifest.outputs.manifest_sha256 }}
     env:
       IMAGE: ai-goofish-monitor:tested
+      SMOKE_CONTAINER: goofish-ci-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - name: Build the release image tested by this run
+      - name: Build the release image once
+        id: build-image
         run: |
-          docker build \
+          docker build --platform linux/amd64 \
             --file Dockerfile.release \
             --build-arg VCS_REF="$GITHUB_SHA" \
             --build-arg SOURCE_URL="https://github.com/$GITHUB_REPOSITORY" \
-            --tag "$IMAGE" \
-            .
-      - name: Verify immutable image provenance labels
+            --tag "$IMAGE" .
+      - name: Verify tested image provenance and platform
+        id: provenance
         run: |
+          test "$(docker image inspect "$IMAGE" --format '{{.Os}}/{{.Architecture}}')" = linux/amd64
           test "$(docker image inspect "$IMAGE" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$GITHUB_SHA"
           test "$(docker image inspect "$IMAGE" --format '{{ index .Config.Labels "org.opencontainers.image.source" }}')" = "https://github.com/$GITHUB_REPOSITORY"
-      - name: Validate NAS Compose template
+      - name: Validate NAS Compose template without contacting NAS
+        id: compose-template
         run: |
+          # env_file is relative to the Compose directory, not the workspace.
           cp .env.example infra/nas/.env
-          printf 'AIGOOFISH_IMAGE=ghcr.io/colorlesscube/ai-goofish-monitor@sha256:%064d\n' 0 > /tmp/.env.images
-          docker compose -f infra/nas/compose.yaml --env-file /tmp/.env.images config --quiet
-      - name: Export the exact tested image
-        if: ${{ inputs.export_image == true }}
+          trap 'rm -f infra/nas/.env "$RUNNER_TEMP/goofish.env.images"' EXIT
+          printf 'AIGOOFISH_IMAGE=ghcr.io/colorlesscube/ai-goofish-monitor@sha256:%064d\n' 0 > "$RUNNER_TEMP/goofish.env.images"
+          docker compose -f infra/nas/compose.yaml --env-file "$RUNNER_TEMP/goofish.env.images" config --quiet
+      - name: Generate disposable CI-only credentials
         run: |
-          mkdir -p /tmp/ai-goofish-release
-          docker image save "$IMAGE" | gzip > /tmp/ai-goofish-release/image.tar.gz
-      - name: Upload tested image
-        if: ${{ inputs.export_image == true }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+          python3 - <<'PY'
+          import os, secrets
+          with open(os.environ['GITHUB_ENV'], 'a') as stream:
+              for key in ('GOOFISH_MCP_READ_TOKEN', 'GOOFISH_MCP_WRITE_TOKEN', 'GOOFISH_SESSION_SECRET', 'WEB_PASSWORD'):
+                  value = secrets.token_urlsafe(48)
+                  print('::add-mask::' + value)
+                  stream.write(key + '=' + value + '\n')
+          PY
+      - name: Smoke native MCP CRUD in a network-isolated disposable container
+        id: smoke
+        run: |
+          docker run --detach --init --network none --cap-drop ALL --security-opt no-new-privileges \
+            --name "$SMOKE_CONTAINER" \
+            --env SERVER_PORT=8000 --env APP_DATABASE_FILE=/app/data/ci.sqlite3 \
+            --env GOOFISH_MCP_ENABLED=true --env GOOFISH_MCP_ALLOWED_HOSTS=127.0.0.1,localhost \
+            --env GOOFISH_MCP_STATE_DIR=/app/data/mcp \
+            --env GOOFISH_MCP_WRITE_SCOPES=tasks:read,tasks:write,tasks:delete,system:read \
+            --env GOOFISH_MCP_READ_TOKEN --env GOOFISH_MCP_WRITE_TOKEN \
+            --env GOOFISH_SESSION_SECRET --env WEB_PASSWORD \
+            "$IMAGE"
+          # No ports, host paths, credentials, crawler or notification services.
+          docker exec -i "$SMOKE_CONTAINER" python - <<'PY'
+          import time, urllib.request
+          for attempt in range(60):
+              try:
+                  for route in ('/health', '/'):
+                      with urllib.request.urlopen('http://127.0.0.1:8000' + route, timeout=2) as response:
+                          if response.status != 200:
+                              raise OSError('not_ready')
+                  break
+              except OSError:
+                  time.sleep(1)
+          else:
+              raise SystemExit('isolated_image_not_ready')
+          PY
+          docker cp scripts/smoke_native_mcp.py "$SMOKE_CONTAINER:/tmp/smoke_native_mcp.py"
+          docker exec "$SMOKE_CONTAINER" python /tmp/smoke_native_mcp.py \
+            --base-url http://127.0.0.1:8000 \
+            --read-token-env GOOFISH_MCP_READ_TOKEN \
+            --write-token-env GOOFISH_MCP_WRITE_TOKEN
+      - name: Checkout reviewed publish-only toolkit
+        id: toolkit
+        if: ${{ github.repository == 'ColorlessCube/ai-goofish-monitor' && github.event_name == 'push' && github.ref == 'refs/heads/master' && github.event.deleted != true }}
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          name: tested-image-${{ github.sha }}
-          path: /tmp/ai-goofish-release/image.tar.gz
-          retention-days: 2
-          compression-level: 0
-          if-no-files-found: error
+          repository: ColorlessCube/nas-deploy-toolkit
+          ref: 13ae397ae0e116eeac0bf388c40f4b12a7f82855
+          path: .nas-deploy-toolkit
+          persist-credentials: false
+      - name: Publish this exact tested image to the existing private GHCR package
+        id: publish-manifest
+        if: ${{ github.repository == 'ColorlessCube/ai-goofish-monitor' && github.event_name == 'push' && github.ref == 'refs/heads/master' && github.event.deleted != true }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER_TYPE: ${{ github.event.repository.owner.type }}
+          PUBLISH_EVENT_DELETED: ${{ github.event.deleted }}
+        run: |
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          python3 scripts/publish_image_manifest.py --toolkit .nas-deploy-toolkit --config infra/nas/release.json --output "$RUNNER_TEMP/goofish-manifest"
+          python3 .nas-deploy-toolkit/infra/deploy/handoff.py export --manifest "$RUNNER_TEMP/goofish-manifest/deploy.json"
+      - name: Clear registry login
+        if: ${{ always() && github.repository == 'ColorlessCube/ai-goofish-monitor' && github.event_name == 'push' && github.ref == 'refs/heads/master' && github.event.deleted != true }}
+        run: docker logout ghcr.io
+      - name: Remove disposable CI container
+        if: always()
+        run: |
+          if docker container inspect "$SMOKE_CONTAINER" >/dev/null 2>&1; then
+            docker rm --force "$SMOKE_CONTAINER"
+          fi

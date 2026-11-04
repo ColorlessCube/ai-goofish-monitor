@@ -55,21 +55,20 @@ class NotificationService:
         product_data: Dict,
         reason: str,
     ) -> Dict[str, str | bool]:
+        from src.infrastructure.external.notification_clients.base import NotificationRejected
+        result = {"channel": client.channel_key, "label": client.display_name,
+                  "attempted": True, "retry_allowed": False, "delivery_status": "unknown"}
         try:
             await client.send(product_data, reason)
-            return {
-                "channel": client.channel_key,
-                "label": client.display_name,
-                "success": True,
-                "message": "发送成功",
-            }
-        except Exception as exc:
-            return {
-                "channel": client.channel_key,
-                "label": client.display_name,
-                "success": False,
-                "message": str(exc),
-            }
+            return {**result, "success": True, "outcome": "accepted",
+                    "message": "接收端已接受，送达或已读状态未知"}
+        except NotificationRejected:
+            return {**result, "success": False, "outcome": "rejected",
+                    "message": "接收端明确拒绝"}
+        except Exception:
+            # A lost response may follow an accepted send. No retry or raw error.
+            return {**result, "success": False, "outcome": "unknown",
+                    "message": "是否接受未知，请勿自动重试"}
 
 
 def build_notification_service(

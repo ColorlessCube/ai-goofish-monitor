@@ -113,6 +113,8 @@ class Task(BaseModel):
     model_config = ConfigDict(use_enum_values=True, extra="ignore")
 
     id: Optional[int] = None
+    instance_id: str = ""
+    config_version: int = 1
     task_name: str
     enabled: bool
     keyword: str
@@ -173,8 +175,8 @@ class TaskCreate(BaseModel):
     min_price: Optional[str] = None
     max_price: Optional[str] = None
     cron: Optional[str] = None
-    ai_prompt_base_file: str = "prompts/base_prompt.txt"
-    ai_prompt_criteria_file: str = ""
+    ai_prompt_base_file: str = Field(default="prompts/base_prompt.txt", description="Controlled flat .txt name or prompts/name.txt; safe bare names are persisted with prompts/ prefix. No absolute paths, traversal, or symlinks.")
+    ai_prompt_criteria_file: str = Field(default="", description="Controlled flat .txt name or prompts/name.txt; safe bare names are persisted with prompts/ prefix. AI mode requires a nonempty asset.")
     account_state_file: Optional[str] = None
     account_strategy: Literal["auto", "fixed", "rotate", "ass"] = "auto"
     free_shipping: bool = True
@@ -240,8 +242,8 @@ class TaskUpdate(BaseModel):
     min_price: Optional[str] = None
     max_price: Optional[str] = None
     cron: Optional[str] = None
-    ai_prompt_base_file: Optional[str] = None
-    ai_prompt_criteria_file: Optional[str] = None
+    ai_prompt_base_file: Optional[str] = Field(default=None, description="Controlled flat .txt name or prompts/name.txt; bare names persist with prompts/ prefix.")
+    ai_prompt_criteria_file: Optional[str] = Field(default=None, description="Controlled flat .txt name or prompts/name.txt; bare names persist with prompts/ prefix.")
     account_state_file: Optional[str] = None
     account_strategy: Optional[Literal["auto", "fixed", "rotate", "ass"]] = None
     free_shipping: Optional[bool] = None
