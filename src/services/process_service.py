@@ -14,6 +14,7 @@ from typing import Awaitable, Callable, Dict, TextIO
 from src.ai_handler import send_ntfy_notification
 from src.config import STATE_FILE
 from src.failure_guard import FailureGuard
+from src.services.task_failure_notices import build_task_failure_notice
 from src.infrastructure.persistence.sqlite_task_repository import find_task_by_name_sync, find_task_by_id_sync
 from src.utils import build_task_log_path
 
@@ -152,7 +153,9 @@ class ProcessService:
             cookie_path=self._resolve_cookie_path(task_name, task_id),
         )
         if decision.skip:
-            await self._notify_skip(task_name, decision)
+            await self._notify_skip(task_name, decision, task_config={
+                "task_name": task_name, "account_strategy": task.account_strategy,
+            })
             return False
 
         log_file_path = ""
@@ -170,7 +173,7 @@ class ProcessService:
         await self._invoke_hook(self._on_started, task_id)
         return True
 
-    async def _notify_skip(self, task_name: str, decision) -> None:
+    async def _notify_skip(self, task_name: str, decision, *, task_config: dict | None = None) -> None:
         print(
             f"[FailureGuard] 跳过启动任务 '{task_name}'，已暂停重试 "
             f"(连续失败 {decision.consecutive_failures}/{self.failure_guard.threshold})"
@@ -178,20 +181,14 @@ class ProcessService:
         if not decision.should_notify:
             return
         try:
-            await send_ntfy_notification(
-                {
-                    "商品标题": f"[任务暂停] {task_name}",
-                    "当前售价": "N/A",
-                    "商品链接": "#",
-                },
-                "任务处于暂停状态，将跳过执行。\n"
-                f"原因: {decision.reason}\n"
-                f"连续失败: {decision.consecutive_failures}/{self.failure_guard.threshold}\n"
-                f"暂停到: {decision.paused_until.strftime('%Y-%m-%d %H:%M:%S') if decision.paused_until else 'N/A'}\n"
-                "请检查所选账号来源；ASS的观察时间或snapshot变化不会自动解除网站暂停。",
+            product, body = build_task_failure_notice(
+                task_config or {"task_name": task_name}, decision.reason,
+                phase="暂停检查", paused_until=decision.paused_until,
+                consecutive=decision.consecutive_failures, threshold=self.failure_guard.threshold,
             )
-        except Exception as exc:
-            print(f"发送任务暂停通知失败: {exc}")
+            await send_ntfy_notification(product, body)
+        except Exception:
+            print("发送任务暂停通知接收状态未知，不自动重试。")
 
     async def _watch_process_exit(self, process: asyncio.subprocess.Process) -> None:
         await process.wait()

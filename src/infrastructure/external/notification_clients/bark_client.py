@@ -26,10 +26,13 @@ class BarkClient(NotificationClient):
         bark_payload = {
             "title": message.notification_title,
             "body": message.content,
-            "url": message.mobile_link or message.desktop_link,
             "level": "timeSensitive",
             "group": "闲鱼监控"
         }
+
+        link = message.mobile_link or message.desktop_link
+        if link or product_data.get("notification_type") != "task_failure":
+            bark_payload["url"] = link
 
         if message.image_url:
             bark_payload["icon"] = message.image_url
