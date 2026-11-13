@@ -10,6 +10,7 @@ import re
 from src.config import STATE_FILE
 from src.infrastructure.persistence.sqlite_task_repository import SqliteTaskRepository
 from src.scraper import scrape_xianyu
+from src.services.scrape_result import ScrapeResult
 from src.services.account_strategy_service import uses_ass_account
 from src.services.prompt_assets import read_prompt
 
@@ -238,7 +239,11 @@ async def main():
     for i, result in enumerate(results):
         task_name = active_task_configs[i]['task_name']
         if isinstance(result, Exception):
-            print(f"任务 '{task_name}' 因异常而终止: {result}")
+            reason = "browser_operation_failed" if uses_ass_account(active_task_configs[i]) else str(result)
+            print(f"任务 '{task_name}' 因异常而终止: {reason}")
+        elif isinstance(result, ScrapeResult) and result.status != "success":
+            status_label = {"source_unavailable": "来源不可用", "paused": "已暂停", "failed": "执行失败"}[result.status]
+            print(f"任务 '{task_name}' {status_label} ({result.reason})，本次运行共处理了 {int(result)} 个新商品。")
         else:
             print(f"任务 '{task_name}' 正常结束，本次运行共处理了 {result} 个新商品。")
 

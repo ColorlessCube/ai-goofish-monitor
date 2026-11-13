@@ -96,6 +96,18 @@ class NotificationClient(ABC):
     def _build_message(self, product_data: Dict, reason: str) -> NotificationMessage:
         """格式化消息内容"""
         title = product_data.get('商品标题', 'N/A')
+        if product_data.get('notification_type') == 'task_failure':
+            return NotificationMessage(
+                title=title,
+                price="",
+                reason=reason,
+                desktop_link="",
+                mobile_link=None,
+                notification_title=title,
+                content=reason,
+                image_url=None,
+            )
+
         price = product_data.get('当前售价', 'N/A')
         desktop_link = product_data.get('商品链接', '#')
         mobile_link = None

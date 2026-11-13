@@ -3,6 +3,7 @@ import json
 import os
 import random
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 from urllib.parse import urlencode
 
@@ -44,6 +45,9 @@ from src.utils import (
 )
 from src.rotation import RotationPool, load_state_files, parse_proxy_pool, RotationItem
 from src.failure_guard import FailureGuard
+from src.services.task_failure_notices import build_task_failure_notice, safe_source_reason
+from src.services.source_notice_throttle import reserve_source_notice
+from src.services.scrape_result import ScrapeResult
 from src.services.account_strategy_service import resolve_account_runtime_plan, uses_ass_account
 from src.infrastructure.credentials.ass_session_client import (
     AssCredentialsError, AssSessionClient, AssSessionSettings, BrowserSession, PRIMARY_ORIGIN,
@@ -114,12 +118,41 @@ def _format_failure_reason(reason: str, limit: int = 500) -> str:
     return cleaned[: limit - 3] + "..."
 
 
+def _failure_notice(task_config: dict, reason: str, *, phase: str, paused_until, consecutive: int):
+    return build_task_failure_notice(
+        task_config, reason, phase=phase, paused_until=paused_until,
+        consecutive=consecutive, threshold=FAILURE_GUARD.threshold,
+    )
+
+
+async def _notify_source_failure(task_config: dict, reason: str, *, phase: str) -> None:
+    reason = safe_source_reason(reason)
+    print(f"ASS来源本次不可用: {reason}")
+    guard_path = Path(getattr(FAILURE_GUARD, "path", "logs/task-failure-guard.json"))
+    notice_path = guard_path.with_name("ass-source-notices.sqlite3")
+    task_key = str(task_config.get("instance_id") or task_config.get("task_name", "未命名任务"))
+    if not await asyncio.to_thread(reserve_source_notice, notice_path, task_key):
+        print("ASS来源提醒已限频或限频状态不可用；不修改网站暂停状态。")
+        return
+    product, body = _failure_notice(task_config, reason, phase=phase,
+                                    paused_until=None, consecutive=0)
+    try:
+        await send_ntfy_notification(product, body)
+    except Exception:
+        print("ASS来源提醒接收状态未知，不自动重试。")
+
+
 async def _notify_task_failure(
-    task_config: dict, reason: str, *, cookie_path: Optional[str]
+    task_config: dict, reason: str, *, cookie_path: Optional[str], phase: str = "任务执行"
 ) -> None:
     task_name = task_config.get("task_name", "未命名任务")
     keyword = task_config.get("keyword", "")
     formatted_reason = _format_failure_reason(reason)
+    if uses_ass_account(task_config) and formatted_reason not in {
+        "site_login_required", "site_risk_control", "browser_timeout",
+        "未找到可用的代理地址，无法继续执行任务。",
+    }:
+        formatted_reason = "browser_operation_failed"
 
     # Some failures are deterministic misconfiguration and should pause/notify immediately.
     pause_immediately = any(
@@ -143,29 +176,15 @@ async def _notify_task_failure(
         )
         return
 
-    paused_until = guard_result.get("paused_until")
-    paused_until_str = (
-        paused_until.strftime("%Y-%m-%d %H:%M:%S") if paused_until else "N/A"
-    )
-
-    product_data = {
-        "商品标题": f"[任务异常] {task_name}",
-        "当前售价": "N/A",
-        "商品链接": "#",
-    }
-    notify_reason = (
-        f"任务运行失败(已连续 {guard_result.get('consecutive_failures')}/{FAILURE_GUARD.threshold} 次): {formatted_reason}"
-        f"\n任务: {task_name}"
-        f"\n关键词: {keyword or 'N/A'}"
-        f"\n已自动暂停重试，暂停到: {paused_until_str}"
-        + ("\n请检查ASS来源或等待网站冷却；远端快照刷新不会自动解除暂停。" if uses_ass_account(task_config)
-           else "\n修复后(更新登录态/cookies文件)将自动恢复。")
+    product_data, notify_reason = _failure_notice(
+        task_config, formatted_reason, phase=phase, paused_until=guard_result.get("paused_until"),
+        consecutive=guard_result.get("consecutive_failures", 0),
     )
 
     try:
         await send_ntfy_notification(product_data, notify_reason)
-    except Exception as e:
-        print(f"发送任务异常通知失败: {e}")
+    except Exception:
+        print("发送任务异常通知失败，接收状态未知，不自动重试。")
 
 
 def _as_bool(value, default: bool = False) -> bool:
@@ -423,6 +442,31 @@ def _check_ass_site_response(data: dict) -> None:
         raise LoginRequiredError("site_login_required")
 
 
+async def _check_site_access(page) -> None:
+    """Read only fixed visibility signals; never export page text/URLs/storage."""
+    if _is_login_url(page.url):
+        raise LoginRequiredError("site_login_required")
+
+    async def visible_block():
+        for selector, error in (
+            ("div.baxia-dialog-mask:visible, div.J_MIDDLEWARE_FRAME_WIDGET:visible", RiskControlError),
+            ('iframe[src*="mini_login"]:visible, iframe[src*="passport.goofish.com"]:visible, '
+             '#alibaba-login-iframe:visible, [class*="loginDialog"]:visible, '
+             '[class*="login-dialog"]:visible, [class*="loginModal"]:visible', LoginRequiredError),
+        ):
+            if await page.locator(selector).first.is_visible():
+                return error
+        return None
+
+    try:
+        error = await asyncio.wait_for(visible_block(), timeout=2)
+    except Exception:
+        # A failed diagnostic is not evidence of expired login.
+        return
+    if error is not None:
+        raise error("site_risk_control" if error is RiskControlError else "site_login_required")
+
+
 async def scrape_user_profile(context, user_id: str, *, ass_session: Optional[BrowserSession] = None) -> dict:
     """
     【新版】访问指定用户的个人主页，按顺序采集其摘要信息、完整的商品列表和完整的评价列表。
@@ -621,12 +665,15 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
         picked = proxy_pool.pick_random()
         return picked or selected_proxy
 
+    failure_phase = "任务执行"
+
     async def _run_scrape_attempt(state_file: Optional[str], proxy_server: Optional[str]) -> int:
-        processed_item_count = 0
+        nonlocal failure_phase, processed_item_count
         stop_scraping = False
         ass_session = None
         snapshot_data = None
         if ass_mode:
+            failure_phase = "ASS来源读取"
             # 每次新浏览器尝试都重新鉴权；禁止把值写成临时state文件或本地fallback。
             ass_session = await asyncio.to_thread(AssSessionClient(AssSessionSettings.from_env()).read)
             if ass_session.observed_age_seconds > 3600:
@@ -642,6 +689,7 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
             except Exception as e:
                 print(f"警告：读取登录状态文件失败，将直接按路径使用: {e}")
 
+        failure_phase = "浏览器启动"
         async with async_playwright() as p:
             # 反检测启动参数
             launch_args = [
@@ -687,6 +735,7 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
 
             context_kwargs = _clean_kwargs(context_kwargs)
             if ass_session is not None:
+                failure_phase = "浏览器会话恢复"
                 try:
                     context = await _new_ass_context(browser, ass_session)
                 except BaseException:
@@ -741,6 +790,7 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
             page = await _new_task_page(context, ass_session)
 
             try:
+                failure_phase = "首页访问"
                 # 步骤 0 - 模拟真实用户：先访问首页（重要的反检测措施）
                 log_time("步骤 0 - 模拟真实用户访问首页...")
                 await page.goto(
@@ -762,6 +812,7 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                 log_time(f"目标URL: {search_url}")
 
                 # 先监听搜索接口响应，再执行导航，避免错过首次请求
+                failure_phase = "初始搜索响应"
                 async with page.expect_response(
                     is_search_results_response, timeout=30000
                 ) as initial_response_info:
@@ -775,8 +826,12 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
 
                 # 捕获初始搜索的API数据
                 initial_response = await initial_response_info.value
+                # Classify visible challenges even when the API returned HTML.
+                await _check_site_access(page)
+                _check_ass_site_response(await initial_response.json())
 
                 # 等待页面加载出关键筛选元素，以确认已成功进入搜索结果页
+                failure_phase = "搜索页面就绪"
                 try:
                     await page.wait_for_selector("text=新发布", timeout=15000)
                 except PlaywrightTimeoutError as e:
@@ -848,6 +903,7 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                 final_response = None
                 log_time("步骤 2 - 应用筛选条件...")
                 if new_publish_option:
+                    failure_phase = "筛选：新发布"
                     try:
                         await page.click("text=新发布")
                         await random_sleep(1, 2)  # 原来是 (1.5, 2.5)
@@ -858,14 +914,19 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                             # --- 修改: 增加排序后的等待时间 ---
                             await random_sleep(2, 4)  # 原来是 (3, 5)
                         final_response = await response_info.value
+                        if not final_response or not final_response.ok:
+                            raise PlaywrightTimeoutError("configured-filter-unconfirmed")
+                    except (AssCredentialsError, LoginRequiredError, RiskControlError):
+                        raise
                     except PlaywrightTimeoutError:
-                        log_time(
-                            f"新发布筛选 '{new_publish_option}' 请求超时，继续执行。"
-                        )
-                    except Exception as e:
-                        print(f"LOG: 应用新发布筛选失败: {_public_error(e, ass_mode)}")
+                        await _check_site_access(page)
+                        raise
+                    except Exception:
+                        await _check_site_access(page)
+                        raise PlaywrightTimeoutError("configured-filter-unconfirmed") from None
 
                 if personal_only:
+                    failure_phase = "筛选：个人闲置"
                     async with page.expect_response(
                         is_search_results_response, timeout=20000
                     ) as response_info:
@@ -875,6 +936,7 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                     final_response = await response_info.value
 
                 if free_shipping:
+                    failure_phase = "筛选：包邮"
                     try:
                         async with page.expect_response(
                             is_search_results_response, timeout=20000
@@ -882,12 +944,19 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                             await page.click("text=包邮")
                             await random_sleep(2, 4)
                         final_response = await response_info.value
+                        if not final_response or not final_response.ok:
+                            raise PlaywrightTimeoutError("configured-filter-unconfirmed")
+                    except (AssCredentialsError, LoginRequiredError, RiskControlError):
+                        raise
                     except PlaywrightTimeoutError:
-                        log_time("包邮筛选请求超时，继续执行。")
-                    except Exception as e:
-                        print(f"LOG: 应用包邮筛选失败: {_public_error(e, ass_mode)}")
+                        await _check_site_access(page)
+                        raise
+                    except Exception:
+                        await _check_site_access(page)
+                        raise PlaywrightTimeoutError("configured-filter-unconfirmed") from None
 
                 if region_filter:
+                    failure_phase = "筛选：区域"
                     try:
                         area_trigger = page.get_by_text("区域", exact=True)
                         if await area_trigger.count():
@@ -945,7 +1014,7 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                                     except PlaywrightTimeoutError:
                                         pass
                                 else:
-                                    print(f"LOG: 未找到{desc} '{text_value}'，跳过。")
+                                    raise PlaywrightTimeoutError("region-option-not-found")
 
                             if len(region_parts) >= 1:
                                 await _click_in_column(
@@ -967,28 +1036,30 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                                 "div.searchBtn--Ic6RKcAb"
                             ).first
                             if await search_btn.count():
-                                try:
-                                    async with page.expect_response(
-                                        is_search_results_response,
-                                        timeout=20000,
-                                    ) as response_info:
-                                        await search_btn.click()
-                                        await random_sleep(2, 3)
-                                    final_response = await response_info.value
-                                except PlaywrightTimeoutError:
-                                    log_time("区域筛选提交超时，继续执行。")
+                                async with page.expect_response(
+                                    is_search_results_response,
+                                    timeout=20000,
+                                ) as response_info:
+                                    await search_btn.click()
+                                    await random_sleep(2, 3)
+                                final_response = await response_info.value
+                                if not final_response or not final_response.ok:
+                                    raise PlaywrightTimeoutError("configured-filter-unconfirmed")
                             else:
-                                print(
-                                    "LOG: 未找到区域弹窗的“查看XX件宝贝”按钮，跳过提交。"
-                                )
+                                raise PlaywrightTimeoutError("region-submit-not-found")
                         else:
-                            print("LOG: 未找到区域筛选触发器。")
+                            raise PlaywrightTimeoutError("region-trigger-not-found")
+                    except (AssCredentialsError, LoginRequiredError, RiskControlError):
+                        raise
                     except PlaywrightTimeoutError:
-                        log_time(f"区域筛选 '{region_filter}' 请求超时，继续执行。")
-                    except Exception as e:
-                        print(f"LOG: 应用区域筛选 '{region_filter}' 失败: {_public_error(e, ass_mode)}")
+                        await _check_site_access(page)
+                        raise
+                    except Exception:
+                        await _check_site_access(page)
+                        raise PlaywrightTimeoutError("configured-filter-unconfirmed") from None
 
                 if min_price or max_price:
+                    failure_phase = "筛选：价格"
                     price_container = page.locator(
                         'div[class*="search-price-input-container"]'
                     ).first
@@ -1026,6 +1097,7 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                     else initial_response
                 )
                 for page_num in range(1, max_pages + 1):
+                    failure_phase = "商品列表"
                     if stop_scraping:
                         break
                     log_time(f"开始处理第 {page_num}/{max_pages} 页 ...")
@@ -1082,6 +1154,7 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                         # --- 修改: 访问详情页前的等待时间，模拟用户在列表页上看了一会儿 ---
                         await random_sleep(2, 4)  # 原来是 (2, 4)
 
+                        failure_phase = "商品详情"
                         detail_page = await _new_task_page(context, ass_session)
                         try:
                             async with detail_page.expect_response(
@@ -1256,10 +1329,7 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                         await random_sleep(10, 15)
 
             except PlaywrightTimeoutError as e:
-                if _is_login_url(page.url):
-                    raise LoginRequiredError(
-                        f"Login required: redirected to {page.url} (cookies/state likely expired)"
-                    ) from e
+                await _check_site_access(page)
                 print(f"\n操作超时错误: 页面元素或网络响应未在规定时间内出现。\n{_public_error(e, ass_mode)}")
                 raise
             except asyncio.CancelledError:
@@ -1318,23 +1388,16 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
         )
         if decision.should_notify:
             try:
-                await send_ntfy_notification(
-                    {
-                        "商品标题": f"[任务暂停] {task_name_for_guard}",
-                        "当前售价": "N/A",
-                        "商品链接": "#",
-                    },
-                    "任务处于暂停状态，将跳过执行。\n"
-                    f"原因: {decision.reason}\n"
-                    f"连续失败: {decision.consecutive_failures}/{FAILURE_GUARD.threshold}\n"
-                    f"暂停到: {decision.paused_until.strftime('%Y-%m-%d %H:%M:%S') if decision.paused_until else 'N/A'}\n"
-                    "请检查所选账号来源；ASS的观察时间或snapshot变化不会自动解除网站暂停。",
+                product, body = _failure_notice(
+                    task_config, decision.reason, phase="暂停检查",
+                    paused_until=decision.paused_until, consecutive=decision.consecutive_failures,
                 )
-            except Exception as e:
-                print(f"发送任务暂停通知失败: {e}")
+                await send_ntfy_notification(product, body)
+            except Exception:
+                print("发送任务暂停通知接收状态未知，不自动重试。")
 
         cleanup_task_images(task_config.get("task_name", "default"))
-        return 0
+        return ScrapeResult(0, status="paused", reason=getattr(decision, "reason", ""))
 
     for attempt in range(1, attempt_limit + 1):
         if attempt == 1:
@@ -1376,15 +1439,15 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
             print(f"IP 轮换：使用代理 {proxy_server}")
 
         try:
-            processed_item_count += await _run_scrape_attempt(state_path, proxy_server)
+            await _run_scrape_attempt(state_path, proxy_server)
             last_error = ""
             FAILURE_GUARD.record_success(task_name_for_guard)
             break
         except AssCredentialsError as e:
-            # 来源错误不是网站登录失败，不叠加风控计数，也不把任务标为成功。
-            print(f"ASS来源本次不可用: {e}")
+            # 来源错误不是网站登录失败；提醒与限频独立，不修改网站guard。
+            await _notify_source_failure(task_config, str(e), phase=failure_phase)
             cleanup_task_images(task_config.get("task_name", "default"))
-            return processed_item_count
+            return ScrapeResult(processed_item_count, status="source_unavailable", reason=str(e))
         except LoginRequiredError as e:
             last_error = "site_login_required" if ass_mode else str(e)
             print(f"检测到登录失效/重定向: {last_error}")
@@ -1394,6 +1457,9 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
             print(f"检测到风控或验证触发: {last_error}")
             # 风控验证通常不是简单轮换能解决的，避免无意义重试。
             break
+        except PlaywrightTimeoutError:
+            last_error = "browser_timeout"
+            print("本次尝试超时：未发现明确的登录失效或网站验证证据。")
         except Exception as e:
             last_error = "browser_operation_failed" if ass_mode else f"{type(e).__name__}: {e}"
             print(f"本次尝试失败: {last_error}")
@@ -1401,9 +1467,9 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                 print("将尝试轮换账号/IP 后重试...")
 
     if last_error:
-        await _notify_task_failure(task_config, last_error, cookie_path=last_state_path)
+        await _notify_task_failure(task_config, last_error, cookie_path=last_state_path, phase=failure_phase)
 
     # 清理任务图片目录
     cleanup_task_images(task_config.get("task_name", "default"))
 
-    return processed_item_count
+    return ScrapeResult(processed_item_count, status="failed" if last_error else "success", reason=last_error)

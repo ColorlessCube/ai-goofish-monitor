@@ -96,13 +96,18 @@ def task():
     return {'task_name': 'fixture', 'keyword': 'fixture', 'account_strategy': 'ass', 'proxy_rotation': {'enabled': False}, 'account_rotation': {'enabled': True}}
 
 
-def test_ass_source_failure_does_not_touch_website_guard_or_fallback(scraper, monkeypatch):
+def test_ass_source_failure_does_not_touch_website_guard_or_fallback(scraper, monkeypatch, tmp_path):
     s, guard = scraper
+    guard.path = str(tmp_path / 'guard.json')
+    notices = []
+    async def notify(product, body): notices.append((product, body))
+    monkeypatch.setattr(s, 'send_ntfy_notification', notify)
     def failed(): raise s.AssCredentialsError('ass_access_denied')
     monkeypatch.setattr(s.AssSessionSettings, 'from_env', failed)
     monkeypatch.setattr(s, 'async_playwright', lambda: (_ for _ in ()).throw(AssertionError('browser-forbidden')))
     assert asyncio.run(s.scrape_xianyu(task())) == 0
     assert guard.paths == [None] and not guard.failures and not guard.successes
+    assert len(notices) == 1 and notices[0][0]['notification_type'] == 'task_failure'
 
 
 def test_pause_blocks_remote_reads_even_with_new_snapshot_or_changed_local_file(scraper, monkeypatch):
